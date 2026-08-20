@@ -1,0 +1,166 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Design tokens.
+
+   Colours come from a validated palette: the categorical order is CVD-checked,
+   status colours are reserved (never reused as a series), and the dark mode is
+   its own set of steps for the dark surface rather than an automatic inversion.
+   Charts reference these by role (var(--series-1)) so both themes swap in one
+   place — SVG resolves CSS custom properties natively.
+--------------------------------------------------------------------------- */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --surface-1: #fcfcfb;
+  --plane: #f4f4f1;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+
+  --diverge-pos: #2a78d6;
+  --diverge-neg: #e34948;
+  --diverge-mid: #f0efec;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --delta-good: #006300;
+  --delta-bad: #c02727;
+
+  --band-fill: rgba(42, 120, 214, 0.1);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface-1: #1a1a19;
+  --plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+
+  --diverge-pos: #3987e5;
+  --diverge-neg: #e66767;
+  --diverge-mid: #383835;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --delta-good: #0ca30c;
+  --delta-bad: #e66767;
+
+  --band-fill: rgba(57, 135, 229, 0.12);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border bg-surface;
+    border-color: var(--border);
+  }
+  .card-pad {
+    @apply p-4 sm:p-5;
+  }
+  .hairline {
+    border-color: var(--border);
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
+           transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2
+           disabled:cursor-not-allowed disabled:opacity-50;
+    --tw-ring-color: var(--series-1);
+    --tw-ring-offset-color: var(--surface-1);
+  }
+  .btn-primary {
+    @apply btn text-white;
+    background: var(--series-1);
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .btn-ghost {
+    @apply btn border;
+    border-color: var(--border);
+    color: var(--text-secondary);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--plane);
+    color: var(--text-primary);
+  }
+  .field {
+    @apply w-full rounded-lg border bg-surface px-3 py-2 text-sm text-ink
+           placeholder:text-ink-muted focus:outline-none focus-visible:ring-2;
+    border-color: var(--border);
+    --tw-ring-color: var(--series-1);
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-muted;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium;
+    border-color: var(--border);
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* recharts chrome */
+.recharts-cartesian-axis-tick text {
+  fill: var(--text-muted);
+  font-size: 11px;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--gridline);
+}
+.recharts-surface {
+  overflow: visible;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--baseline);
+  border-radius: 6px;
+}

@@ -1,0 +1,4 @@
+date,region,product,channel,segment,revenue,units_sold,orders,customers,fulfilled_orders,stockout_events,inventory_units,cost_of_goods,marketing_spend,returns,support_tickets
+2026-01-05,North,Product A,Online,Enterprise,128450.75,482,185,144,185,7,2610,72180.40,11945.90,11,27
+2026-01-05,North,Product A,Retail Partner,SMB,61230.10,229,88,69,88,3,1240,34410.55,3184.00,5,13
+2026-01-12,South,Product B,Online,Enterprise,54118.60,286,110,86,110,4,1550,33748.20,5032.90,7,16

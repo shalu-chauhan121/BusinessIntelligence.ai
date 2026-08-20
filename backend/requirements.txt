@@ -1,0 +1,27 @@
+# --- core API -------------------------------------------------------------
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-multipart==0.0.20
+
+# --- deterministic data-analysis layer ------------------------------------
+pandas==2.2.3
+numpy==2.2.1
+
+# --- unstructured / RAG ---------------------------------------------------
+pypdf==5.1.0
+
+# --- auth -----------------------------------------------------------------
+firebase-admin==6.6.0
+PyJWT==2.10.1
+
+# --- LLM reasoning layer --------------------------------------------------
+anthropic==0.42.0
+
+# --- optional: MongoDB Atlas backend (DB_BACKEND=mongo) --------------------
+pymongo==4.10.1
+
+# --- dev ------------------------------------------------------------------
+pytest==8.3.4
+httpx==0.28.1
