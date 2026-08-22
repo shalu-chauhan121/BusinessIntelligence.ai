@@ -22,3 +22,18 @@ services:
 
       - key: AUTH_MODE
         value: firebase
+
+      - key: MONGODB_URI
+        sync: false
+
+      - key: MONGODB_DB
+        value: businessintelligence
+
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+
+      - key: CORS_ORIGINS
+        value: https://placeholder.invalid
