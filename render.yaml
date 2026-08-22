@@ -4,6 +4,7 @@ services:
     runtime: python
     plan: free
     rootDir: backend
+
     buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
@@ -11,10 +12,13 @@ services:
 
     envVars:
       - key: PYTHON_VERSION
-        value: "3.12"
+        value: "3.12.14"
+
       - key: APP_ENV
         value: production
+
       - key: DB_BACKEND
         value: mongo
+
       - key: AUTH_MODE
         value: firebase
