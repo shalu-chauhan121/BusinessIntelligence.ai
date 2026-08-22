@@ -8,13 +8,13 @@ services:
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     autoDeploy: true
+
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
       - key: APP_ENV
         value: production
       - key: DB_BACKEND
         value: mongo
       - key: AUTH_MODE
         value: firebase
-        envVars:
-      - key: PYTHON_VERSION
-        value: "3.12"
