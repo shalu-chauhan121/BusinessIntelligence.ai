@@ -19,6 +19,7 @@ from ..engines.investigate import investigate
 from ..engines.observe import Timeframe, available_timeframes, observe
 from ..llm.client import get_llm
 from . import dataset_service
+from .telemetry import track_processing_step
 
 
 def resolve_timeframe(df, year: Optional[int], quarter: Optional[int]) -> Timeframe:
@@ -33,12 +34,13 @@ def resolve_timeframe(df, year: Optional[int], quarter: Optional[int]) -> Timefr
 
 def run_observe(dataset: Dict[str, Any], metric: Optional[str], year: Optional[int],
                 quarter: Optional[int], comparison: str = "previous_period") -> Dict[str, Any]:
-    df, schema = dataset_service.load(dataset)
-    kpi = metric or ("revenue" if "revenue" in schema.available_kpis else schema.available_kpis[0])
-    if kpi not in schema.available_kpis:
-        raise ValueError(f"'{kpi}' is not available in this dataset. Available: {', '.join(schema.available_kpis)}")
-    tf = resolve_timeframe(df, year, quarter)
-    return observe(df, schema, kpi, tf, comparison)
+    with track_processing_step("Observe", "Non-LLM Processing"):
+        df, schema = dataset_service.load(dataset)
+        kpi = metric or ("revenue" if "revenue" in schema.available_kpis else schema.available_kpis[0])
+        if kpi not in schema.available_kpis:
+            raise ValueError(f"'{kpi}' is not available in this dataset. Available: {', '.join(schema.available_kpis)}")
+        tf = resolve_timeframe(df, year, quarter)
+        return observe(df, schema, kpi, tf, comparison)
 
 
 def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Optional[int],
@@ -52,15 +54,18 @@ def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Opt
     stage_times = {"observe": round(time.time() - started, 3)}
 
     t = time.time()
-    investigation = investigate(df, schema, observation, uid, llm=llm)
+    with track_processing_step("Investigate", "Non-LLM Processing"):
+        investigation = investigate(df, schema, observation, uid, llm=llm)
     stage_times["investigate"] = round(time.time() - t, 3)
 
     t = time.time()
-    contested = contest(df, schema, observation, investigation, uid, llm=llm)
+    with track_processing_step("Contest", "Non-LLM Processing"):
+        contested = contest(df, schema, observation, investigation, uid, llm=llm)
     stage_times["contest"] = round(time.time() - t, 3)
 
     t = time.time()
-    action = act(df, observation, investigation, contested, llm=llm)
+    with track_processing_step("Act", "Non-LLM Processing"):
+        action = act(df, observation, investigation, contested, llm=llm)
     stage_times["act"] = round(time.time() - t, 3)
 
     result = {

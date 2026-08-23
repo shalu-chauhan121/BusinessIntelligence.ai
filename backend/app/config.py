@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-5"
     llm_max_tokens: int = 4000
     llm_timeout_seconds: int = 90
+    llm_pricing_json: str = ""
 
     # analysis
     anomaly_z_threshold: float = 2.0

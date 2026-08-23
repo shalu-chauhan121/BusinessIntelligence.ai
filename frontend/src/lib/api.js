@@ -105,6 +105,8 @@ export const api = {
     if (comparison) qs.set('comparison', comparison)
     return request(`/api/dashboard?${qs.toString()}`)
   },
+  telemetrySummary: () => request('/api/telemetry/summary'),
+  telemetryRecent: () => request('/api/telemetry/recent'),
   runInvestigation: (payload, signal) =>
     request('/api/investigations/run', { method: 'POST', body: payload, signal }),
   listInvestigations: () => request('/api/investigations'),

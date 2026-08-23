@@ -12,10 +12,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
 from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM
+from ..services.telemetry import track_llm_call
 
 log = logging.getLogger(__name__)
 JSON_BLOCK = re.compile(r"\{.*\}", re.S)
@@ -82,12 +84,16 @@ class LLMClient:
     def _call(self, system: str, user: str) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("LLM disabled")
-        resp = self._client.messages.create(
-            model=self.model,
-            max_tokens=self.settings.llm_max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        started = time.perf_counter()
+        try:
+            resp = self._client.messages.create(
+                model=self.model, max_tokens=self.settings.llm_max_tokens, system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+        except Exception as exc:
+            track_llm_call(model=self.model, system=system, user=user, error=exc, started=started)
+            raise
+        track_llm_call(model=self.model, system=system, user=user, response=resp, started=started)
         text = "".join(getattr(b, "text", "") for b in resp.content)
         return _extract_json(text)
 

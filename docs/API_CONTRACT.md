@@ -376,6 +376,22 @@ being written.
     "total_seconds": 1.40,
     "pipeline": ["observe","investigate","contest","act"]
   },
+  "telemetry": {
+    "trace_id": "trc_…",
+    "start_time": "2026-08-23T10:00:00+00:00",
+    "end_time": "2026-08-23T10:00:01+00:00",
+    "duration_ms": 1400,
+    "model_name": "claude-sonnet-4-5",
+    "model_calls": 3,
+    "prompt_tokens": 1200, "completion_tokens": 400, "total_tokens": 1600,
+    "estimated_cost": 0.0096,
+    "status": "success",
+    "processing": {
+      "llm": { "label": "LLM Processing", "step_count": 3, "duration_ms": 800 },
+      "non_llm": { "label": "Non-LLM Processing", "step_count": 4, "duration_ms": 600 }
+    },
+    "errors": []
+  },
   "view": { "role": "data_analyst", "analyst_detail_included": true }
 }
 ```

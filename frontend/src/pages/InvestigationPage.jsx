@@ -133,11 +133,48 @@ export default function InvestigationPage() {
           {stage === 'investigate' ? <InvestigateStage result={result} isAnalyst={isAnalyst} /> : null}
           {stage === 'contest' ? <ContestStage result={result} isAnalyst={isAnalyst} /> : null}
           {stage === 'act' ? <ActStage result={result} isAnalyst={isAnalyst} /> : null}
+          {result.telemetry ? <TelemetryResult telemetry={result.telemetry} /> : null}
           <EngineFooter engine={result.engine} />
         </>
       ) : null}
     </div>
   )
+}
+
+function TelemetryResult({ telemetry }) {
+  const processing = telemetry.processing || {}
+  const llm = processing.llm || {}
+  const nonLlm = processing.non_llm || {}
+  const errors = telemetry.errors || []
+  return (
+    <div className="card card-pad">
+      <SectionTitle eyebrow="Runtime telemetry" title="This insight request" description="Model usage comes from the provider when available; no prompts, model output or raw business data are stored." />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="End-to-end latency" value={`${telemetry.latency_ms || 0} ms`} />
+        <Stat label="Model calls" value={telemetry.model_calls || 0} />
+        <Stat label="Model" value={telemetry.model_name || 'No model call'} />
+        <Stat label="Prompt tokens" value={(telemetry.prompt_tokens || telemetry.input_tokens || 0).toLocaleString()} />
+        <Stat label="Completion tokens" value={(telemetry.completion_tokens || telemetry.output_tokens || 0).toLocaleString()} />
+        <Stat label="Total tokens" value={(telemetry.total_tokens || 0).toLocaleString()} />
+        <Stat label="Estimated cost" value={`$${Number(telemetry.estimated_cost || 0).toFixed(3)}`} />
+        <Stat label="Request status" value={telemetry.status || 'unknown'} />
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <Stat label="LLM Processing" value={`${llm.duration_ms || 0} ms · ${llm.step_count || 0} calls`} />
+        <Stat label="Non-LLM Processing" value={`${nonLlm.duration_ms || 0} ms · ${nonLlm.step_count || 0} steps`} />
+      </div>
+      <p className="mt-3 text-xs text-ink-muted">
+        Started {formatTelemetryTime(telemetry.start_time)} · Ended {formatTelemetryTime(telemetry.end_time)} · Trace ID: {telemetry.trace_id}
+      </p>
+      {errors.length ? (
+        <p className="mt-2 text-xs text-delta-bad">Tracked errors: {errors.map((error) => `${error.step}: ${error.error_type}`).join(' · ')}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function formatTelemetryTime(value) {
+  return value ? new Date(value).toLocaleTimeString() : 'not recorded'
 }
 
 function StageNav({ stage, setStage, result }) {
