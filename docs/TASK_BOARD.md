@@ -1,7 +1,7 @@
 # Task board
 
 
-Swarup 
+Salugu Swarup 
 The seed brief asks for 40–60 atomic tasks rather than vague ones like "build RAG". This is
 the board this prototype was actually built from: 58 tasks, each independently executable,
 testable, and small enough for one developer.
