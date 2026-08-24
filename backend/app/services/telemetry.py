@@ -47,6 +47,8 @@ class TelemetrySession:
         self.start_time = self.timestamp
         self.started = time.perf_counter()
         self.calls: list[Dict[str, Any]] = []
+        self.cache_hits = 0
+        self.cache_misses = 0
         self.steps: list[Dict[str, Any]] = []
         self.failed_error: Optional[str] = None
         self.saved: Optional[Dict[str, Any]] = None
@@ -79,6 +81,12 @@ class TelemetrySession:
             "status": "failed" if error else "success", "error_type": type(error).__name__ if error else None,
             "processing_type": "LLM Processing", "step": "Model API call",
         })
+
+    def record_cache_lookup(self, hit: bool) -> None:
+        if hit:
+            self.cache_hits += 1
+        else:
+            self.cache_misses += 1
 
     def record_step(self, *, name: str, processing_type: str, started: float,
                     llm_duration_ms: int = 0, error: Optional[BaseException] = None) -> None:
@@ -115,6 +123,9 @@ class TelemetrySession:
             "total_tokens": sum(c["total_tokens"] for c in calls),
             "estimated_cost": round(sum(c["estimated_cost"] or 0 for c in calls), 8),
             "cost_estimated": True, "tokens_estimated": any(c["tokens_estimated"] for c in calls),
+            "cache_hit": bool(self.cache_hits and not self.cache_misses),
+            "cache_miss": bool(self.cache_misses),
+            "cache_hits": self.cache_hits, "cache_misses": self.cache_misses,
             "latency_ms": duration_ms,
             "llm_latency_ms": sum(c["latency_ms"] for c in calls), "status": "failed" if error else "success",
             "error_type": self.failed_error, "errors": errors, "calls": calls,
@@ -160,6 +171,12 @@ def track_llm_call(*, model: str, system: str, user: str, response: Any = None,
     session = _current.get()
     if session:
         session.record_call(model=model, system=system, user=user, response=response, error=error, started=started)
+
+
+def track_llm_cache(*, hit: bool) -> None:
+    session = _current.get()
+    if session:
+        session.record_cache_lookup(hit)
 
 
 @contextmanager

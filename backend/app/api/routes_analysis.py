@@ -56,7 +56,8 @@ def dashboard(year: Optional[int] = Query(default=None),
               dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
     """Everything the dashboard needs for one (year, quarter) selection."""
     with request_telemetry(user["uid"], "/api/dashboard") as telemetry:
-        df, schema = dataset_service.load(dataset)
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(dataset)
         observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison)
     return {
         "dataset": {"id": dataset["_id"], "filename": dataset.get("filename"),
@@ -96,7 +97,8 @@ def investigate_endpoint(body: AnalysisRequest,
                          user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
     with request_telemetry(user["uid"], "/api/investigate") as telemetry:
-        df, schema = dataset_service.load(ds)
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds)
         observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
         llm = get_llm() if body.use_llm else None
         with track_processing_step("Investigate", "Non-LLM Processing"):
@@ -115,7 +117,8 @@ def contest_endpoint(body: AnalysisRequest,
                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
     with request_telemetry(user["uid"], "/api/contest") as telemetry:
-        df, schema = dataset_service.load(ds)
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds)
         observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
         llm = get_llm() if body.use_llm else None
         with track_processing_step("Investigate", "Non-LLM Processing"):
@@ -137,7 +140,8 @@ def act_endpoint(body: AnalysisRequest,
                  user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     ds = _dataset_for(user, body.dataset_id)
     with request_telemetry(user["uid"], "/api/act") as telemetry:
-        df, schema = dataset_service.load(ds)
+        with track_processing_step("Load dataset", "Non-LLM Processing"):
+            df, schema = dataset_service.load(ds)
         observation = _guard(pipeline.run_observe, ds, body.kpi, body.year, body.quarter, body.comparison)
         llm = get_llm() if body.use_llm else None
         with track_processing_step("Investigate", "Non-LLM Processing"):

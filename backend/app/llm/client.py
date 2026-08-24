@@ -13,14 +13,17 @@ import json
 import logging
 import re
 import time
+from copy import deepcopy
+from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
 from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM
-from ..services.telemetry import track_llm_call
+from ..services.telemetry import track_llm_cache, track_llm_call
 
 log = logging.getLogger(__name__)
 JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+CACHE_VERSION = "llm-result-v1"
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -47,6 +50,7 @@ class LLMClient:
         self.settings = s
         self.model = s.anthropic_model
         self._client = None
+        self._cache: Dict[str, Dict[str, Any]] = {}
         self.last_error: Optional[str] = None
         if s.llm_enabled:
             try:
@@ -81,9 +85,20 @@ class LLMClient:
         }
 
     # -- transport ---------------------------------------------------------
+    def _cache_key(self, system: str, user: str) -> str:
+        payload = json.dumps({"version": CACHE_VERSION, "provider": "anthropic", "model": self.model,
+                              "system": system, "user": user}, sort_keys=True, separators=(",", ":"))
+        return sha256(payload.encode()).hexdigest()
+
     def _call(self, system: str, user: str) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("LLM disabled")
+        cache_key = self._cache_key(system, user)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            track_llm_cache(hit=True)
+            return deepcopy(cached)
+        track_llm_cache(hit=False)
         started = time.perf_counter()
         try:
             resp = self._client.messages.create(
@@ -95,7 +110,9 @@ class LLMClient:
             raise
         track_llm_call(model=self.model, system=system, user=user, response=resp, started=started)
         text = "".join(getattr(b, "text", "") for b in resp.content)
-        return _extract_json(text)
+        result = _extract_json(text)
+        self._cache[cache_key] = deepcopy(result)
+        return result
 
     # -- fact sheets -------------------------------------------------------
     @staticmethod
@@ -109,6 +126,9 @@ class LLMClient:
             "baseline_value": _round(observation.get("baseline_value")),
             "change_pct": _round(observation.get("change_pct")),
             "verdict": observation.get("verdict"),
+            "history_status": observation.get("history_status"),
+            "history_context": observation.get("history_note"),
+            "historical_trend_available": observation.get("history_status") == "sufficient_history",
             "robust_z": _round(sig.get("robust_z")),
             "normal_change_median_pct": _round(sig.get("median_historical_change_pct")),
             "method": sig.get("method"),

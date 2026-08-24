@@ -164,6 +164,18 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     same_q = np.array([c["change_pct"] for c in history if c["quarter"] == (tf.quarter or 0)
                        and c["change_pct"] == c["change_pct"]])
 
+    history_status = "newly_launched" if current is None else (
+        "sparse_history" if len(hist_all) < s.min_history_comparisons else "sufficient_history"
+    )
+    history_note = (
+        "This KPI is newly launched for the selected period. Its current value is available, but there is no prior "
+        "period for historical trend analysis."
+        if history_status == "newly_launched" else
+        (f"Only {len(hist_all)} historical comparison period(s) are available; at least "
+         f"{s.min_history_comparisons} are required for trend and normal-variation analysis."
+         if history_status == "sparse_history" else None)
+    )
+
     med_all, sig_all = _robust_sigma(hist_all)
     med_seasonal, sig_seasonal = _robust_sigma(same_q)
 
@@ -205,7 +217,11 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     statistically_unusual = abs(z) >= s.anomaly_z_threshold if z == z else False
     is_anomaly = bool(material and statistically_unusual)
 
-    if len(hist_all) < 4:
+    if history_status == "newly_launched":
+        power = history_note
+    elif history_status == "sparse_history":
+        power = history_note
+    elif len(hist_all) < 4:
         power = ("Weak: fewer than 4 historical comparison periods, so 'normal variation' is "
                  "estimated from very little data. Treat the verdict as indicative.")
     elif not seasonal_ok and (tf.quarter is not None):
@@ -214,7 +230,13 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
     else:
         power = "Good: the comparison is restricted to the same quarter transition in previous years."
 
-    if is_anomaly:
+    if history_status != "sufficient_history":
+        verdict = history_status
+        is_anomaly = material = statistically_unusual = False
+        expected_value = band = None
+        z = med = sigma = float("nan")
+        method = "insufficient_history"
+    elif is_anomaly:
         verdict = "meaningful_signal"
     elif material and not statistically_unusual:
         verdict = "within_normal_variation"
@@ -225,6 +247,8 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
 
     return {
         "method": method,
+        "history_status": history_status,
+        "history_note": history_note,
         "comparison": comparison,
         "current_period": cur_key,
         "baseline_period": base_key,
@@ -432,6 +456,8 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
         "is_unfavourable": bool(unfavourable),
         "anomaly": significance["is_anomaly"],
         "verdict": significance["verdict"],
+        "history_status": significance["history_status"],
+        "history_note": significance["history_note"],
         "significance": significance,
         "drivers": drivers,
         "top_drivers": top,

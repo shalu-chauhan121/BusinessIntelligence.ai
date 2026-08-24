@@ -7,6 +7,9 @@ import pandas as pd
 
 from app.engines.metrics import compute, detect_schema, prepare
 from app.engines.observe import Timeframe, decompose_dimension, observe, slice_period
+from app.engines.investigate import investigate
+from app.engines.contest import contest
+from app.engines.act import act
 
 from .base import EngineTestCase
 
@@ -82,6 +85,7 @@ class TestDriverDecomposition(EngineTestCase):
 class TestSignificance(EngineTestCase):
     def test_planted_anomaly_is_detected(self):
         result = observe(self.df, self.schema, "revenue", Timeframe(2026, 2))
+        self.assertEqual(result["history_status"], "sufficient_history")
         self.assertTrue(result["anomaly"])
         self.assertEqual(result["verdict"], "meaningful_signal")
         self.assertLess(result["change_pct"], -15)
@@ -131,6 +135,31 @@ class TestRobustness(EngineTestCase):
     def test_missing_date_column_is_rejected_clearly(self):
         with self.assertRaises(ValueError):
             detect_schema(pd.DataFrame({"revenue": [1, 2, 3], "region": ["a", "b", "c"]}))
+
+
+class TestSparseHistory(EngineTestCase):
+    def _observe(self, dates):
+        raw = pd.DataFrame({"date": dates, "revenue": [100] * len(dates)})
+        schema = detect_schema(raw)
+        return prepare(raw, schema), schema
+
+    def test_sparse_history_has_current_value_without_trend_conclusions(self):
+        df, schema = self._observe(["2025-10-01", "2026-01-01", "2026-04-01"])
+        result = observe(df, schema, "revenue", Timeframe(2026, 2))
+        self.assertEqual(result["history_status"], "sparse_history")
+        self.assertIsNotNone(result["current_value"])
+        self.assertIsNone(result["significance"]["robust_z"])
+        self.assertIsNone(result["significance"]["normal_range"])
+
+    def test_new_kpi_has_no_fabricated_trend_or_confidence(self):
+        df, schema = self._observe(["2026-04-01"])
+        observation = observe(df, schema, "revenue", Timeframe(2026, 2))
+        self.assertEqual(observation["history_status"], "newly_launched")
+        investigation = investigate(df, schema, observation, self.uid, llm=None)
+        contested = contest(df, schema, observation, investigation, self.uid, llm=None)
+        action = act(df, observation, investigation, contested, llm=None)
+        self.assertEqual(contested["ranking"], [])
+        self.assertIsNone(action["recommendations"][0]["based_on"]["confidence"])
 
 
 if __name__ == "__main__":

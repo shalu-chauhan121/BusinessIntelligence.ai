@@ -471,6 +471,18 @@ def contest(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, Any]
             if m not in unresolved:
                 unresolved.append(m)
 
+    clarification_request = None
+    if unresolved and (not top or top["scoring"]["confidence"] < 45 or ambiguity):
+        reason = ambiguity or (
+            "No explanation has sufficient evidence to support a recommendation."
+        )
+        clarification_request = {
+            "status": "clarification_required",
+            "reason": reason,
+            "missing_evidence": unresolved,
+            "questions": [f"Can you provide: {item}" for item in unresolved],
+        }
+
     return {
         "ranking": [
             {
@@ -487,6 +499,7 @@ def contest(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, Any]
         "hypotheses": contested,
         "ambiguity_note": ambiguity,
         "unresolved_questions": unresolved,
+        "clarification_request": clarification_request,
         "confidence_disclaimer": (
             "Confidence scores are evidence-strength scores computed from how much measured evidence "
             "supports each explanation, how much contradicts it, and how much is missing. They are not "

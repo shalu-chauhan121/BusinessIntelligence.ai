@@ -5,8 +5,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.api.routes_analysis import telemetry_summary
+from app.api.routes_analysis import run_investigation, telemetry_summary
 from app.db.repositories import TelemetryRepository
+from app.llm.client import LLMClient
+from app.models.schemas import AnalysisRequest
 from app.services import pipeline
 from app.services.telemetry import (
     TelemetrySession, estimate_tokens, request_telemetry, track_llm_call, track_processing_step,
@@ -61,9 +63,65 @@ class TestRuntimeTelemetry(EngineTestCase):
             pipeline.run_full(self.uid, self.dataset, "revenue", 2026, 2,
                               persist=False, use_llm=False)
         self.assertEqual([step["name"] for step in session.saved["steps"]],
-                         ["Observe", "Investigate", "Contest", "Act"])
+                         ["Load dataset", "Observe", "Investigate", "Contest", "Act"])
         self.assertTrue(all(step["processing_type"] == "Non-LLM Processing"
                             for step in session.saved["steps"]))
+
+    def test_llm_client_call_records_the_real_wrapper_path(self):
+        client = LLMClient()
+        response = self._response(13, 5)
+        response.content = [SimpleNamespace(text='{"framing_note": "ok"}')]
+        client._client = SimpleNamespace(
+            messages=SimpleNamespace(create=lambda **_: response),
+        )
+        with request_telemetry(self.uid, "/test") as session:
+            self.assertEqual(client._call("system", "user"), {"framing_note": "ok"})
+        call = session.saved["calls"][0]
+        self.assertEqual(call["model_name"], client.model)
+        self.assertEqual(call["input_tokens"], 13)
+        self.assertEqual(call["output_tokens"], 5)
+        self.assertEqual(call["processing_type"], "LLM Processing")
+
+    def test_llm_client_caches_identical_prompt_without_new_usage(self):
+        client = LLMClient()
+        response = self._response(13, 5)
+        response.content = [SimpleNamespace(text='{"framing_note": "cached"}')]
+        calls = 0
+        def create(**_):
+            nonlocal calls
+            calls += 1
+            return response
+        client._client = SimpleNamespace(messages=SimpleNamespace(create=create))
+
+        with request_telemetry(self.uid, "/test") as first:
+            client._call("system", "context-a")
+        with request_telemetry(self.uid, "/test") as repeated:
+            client._call("system", "context-a")
+        with request_telemetry(self.uid, "/test") as changed_context:
+            client._call("system", "context-b")
+        client.model = "claude-sonnet-other"
+        with request_telemetry(self.uid, "/test") as changed_model:
+            client._call("system", "context-a")
+
+        self.assertEqual(calls, 3)
+        self.assertTrue(first.saved["cache_miss"])
+        self.assertEqual(first.saved["model_calls"], 1)
+        self.assertGreater(first.saved["estimated_cost"], 0)
+        self.assertTrue(repeated.saved["cache_hit"])
+        self.assertEqual(repeated.saved["model_calls"], 0)
+        self.assertEqual(repeated.saved["total_tokens"], 0)
+        self.assertEqual(repeated.saved["estimated_cost"], 0)
+        self.assertTrue(changed_context.saved["cache_miss"])
+        self.assertTrue(changed_model.saved["cache_miss"])
+
+    def test_run_endpoint_returns_runtime_telemetry(self):
+        response = run_investigation(
+            AnalysisRequest(kpi="revenue", year=2026, quarter=2, persist=False, use_llm=False),
+            {"uid": self.uid, "role": "data_analyst"},
+        )
+        self.assertIn("telemetry", response)
+        self.assertEqual(response["telemetry"]["endpoint"], "/api/investigations/run")
+        self.assertEqual(response["telemetry"]["processing"]["non_llm"]["step_count"], 5)
 
     def test_missing_usage_uses_explicit_lightweight_fallback(self):
         self.assertEqual(estimate_tokens("abcd"), 1)

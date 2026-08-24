@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # analysis
     anomaly_z_threshold: float = 2.0
     min_material_change_pct: float = 3.0
+    min_history_comparisons: int = 4
     max_drivers_per_dimension: int = 5
 
     @property

@@ -47,7 +47,8 @@ def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Opt
              quarter: Optional[int], comparison: str = "previous_period",
              persist: bool = True, use_llm: bool = True) -> Dict[str, Any]:
     started = time.time()
-    df, schema = dataset_service.load(dataset)
+    with track_processing_step("Load dataset", "Non-LLM Processing"):
+        df, schema = dataset_service.load(dataset)
     llm = get_llm() if use_llm else None
 
     observation = run_observe(dataset, metric, year, quarter, comparison)

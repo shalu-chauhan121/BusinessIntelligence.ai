@@ -46,7 +46,7 @@ export default function Recommendations({ recommendations = [], limits = [] }) {
               {rec.owner}
             </span>
             <span>
-              Based on: {rec.based_on.hypothesis} ({rec.based_on.confidence}% {rec.based_on.band})
+              Based on: {rec.based_on.hypothesis}{rec.based_on.confidence == null ? ' — confidence not assessed' : ` (${rec.based_on.confidence}% ${rec.based_on.band})`}
             </span>
           </div>
 

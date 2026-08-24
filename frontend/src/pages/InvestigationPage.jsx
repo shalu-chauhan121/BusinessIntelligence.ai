@@ -153,6 +153,7 @@ function TelemetryResult({ telemetry }) {
         <Stat label="End-to-end latency" value={`${telemetry.latency_ms || 0} ms`} />
         <Stat label="Model calls" value={telemetry.model_calls || 0} />
         <Stat label="Model" value={telemetry.model_name || 'No model call'} />
+        <Stat label="LLM cache" value={telemetry.cache_hit ? 'Cache hit' : telemetry.cache_miss ? 'Cache miss' : 'Not used'} />
         <Stat label="Prompt tokens" value={(telemetry.prompt_tokens || telemetry.input_tokens || 0).toLocaleString()} />
         <Stat label="Completion tokens" value={(telemetry.completion_tokens || telemetry.output_tokens || 0).toLocaleString()} />
         <Stat label="Total tokens" value={(telemetry.total_tokens || 0).toLocaleString()} />
@@ -374,6 +375,15 @@ function ContestStage({ result, isAnalyst }) {
         </Callout>
       ) : null}
 
+      {contest.clarification_request ? (
+        <Callout tone="warning" title="Clarification required">
+          <p>{contest.clarification_request.reason}</p>
+          <ul className="mt-2 space-y-1">
+            {contest.clarification_request.questions.map((question, i) => <li key={i}>· {question}</li>)}
+          </ul>
+        </Callout>
+      ) : null}
+
       <div className="space-y-3">
         {contest.hypotheses.map((h, i) => (
           <HypothesisCard key={h.key} hypothesis={h} rank={i + 1} isAnalyst={isAnalyst} defaultOpen={i === 0} />
@@ -440,6 +450,15 @@ function ActStage({ result }) {
               ))}
             </ul>
           )}
+        </Callout>
+      ) : null}
+
+      {act.clarification_request ? (
+        <Callout tone="warning" title="Clarification required">
+          <p>{act.clarification_request.reason}</p>
+          <ul className="mt-2 space-y-1">
+            {act.clarification_request.questions.map((question, i) => <li key={i}>· {question}</li>)}
+          </ul>
         </Callout>
       ) : null}
 
