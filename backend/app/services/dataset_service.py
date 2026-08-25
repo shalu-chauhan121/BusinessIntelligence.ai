@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 from ..config import get_settings
 from ..db.repositories import DatasetRepository
@@ -73,20 +77,74 @@ def store_upload(uid: str, filename: str, raw: bytes) -> Dict[str, Any]:
     return ds
 
 
-def load(dataset: Dict[str, Any]) -> Tuple[pd.DataFrame, DatasetSchema]:
-    """Load + prepare a dataset, cached on (path, mtime)."""
+def attach_contract(uid: str, dataset: Dict[str, Any], df: pd.DataFrame,
+                    schema: DatasetSchema) -> DatasetSchema:
+    """
+    Resolve this dataset's KPI Contract and hang it on the schema.
+
+    The contract is the source of truth for what a KPI means. A dataset that has
+    none — anything uploaded before this layer existed, or one whose owner has
+    not opened the KPI Studio — gets a provisional contract generated from the
+    general library, which reproduces the previous behaviour exactly.
+
+    A failure here must never make a dataset unanalysable: the engines fall back
+    to the seed registry when `contract_resolver` is None.
+    """
+    from ..kpi import service as kpi_service
+
+    try:
+        contract = kpi_service.get_or_bootstrap(uid, dataset, df, schema)
+        resolver = kpi_service.resolver_for(contract)
+    except Exception as exc:                       # pragma: no cover - defensive
+        log.warning("Could not resolve a KPI contract for %s: %s", dataset.get("_id"), exc)
+        return schema
+
+    if not resolver:
+        return schema
+
+    schema.contract_resolver = resolver
+    schema.contract_status = contract.status
+    schema.contract_version = contract.version
+    # The business context the contract was screened under. Rebuilt rather than
+    # re-detected: detection needs library matches that only exist at discovery
+    # time, and the contract already records everything the context needs.
+    try:
+        from ..kpi.domain import domain_context_from_contract
+        schema.domain = domain_context_from_contract(contract)
+    except Exception as exc:                       # pragma: no cover - defensive
+        log.warning("Could not rebuild domain context for %s: %s", dataset.get("_id"), exc)
+    # The contract decides which KPIs exist. Only those whose source columns are
+    # actually present in the frame can be offered.
+    columns = set(df.columns)
+    schema.available_kpis = [k for k, c in resolver.items()
+                             if set(c.source_fields) <= columns]
+    return schema
+
+
+def load(dataset: Dict[str, Any], uid: Optional[str] = None
+         ) -> Tuple[pd.DataFrame, DatasetSchema]:
+    """
+    Load + prepare a dataset, cached on (path, mtime).
+
+    When `uid` is supplied the dataset's KPI Contract is resolved and attached.
+    The cache holds the contract-free schema, because a contract can be edited
+    between two loads of the same unchanged file.
+    """
     path = dataset["path"]
     if not os.path.exists(path):
         raise DatasetError("The stored dataset file is missing. Please re-upload it.")
     mtime = os.path.getmtime(path)
     cached = _CACHE.get(path)
     if cached and cached[0] == mtime:
-        return cached[1], cached[2]
+        df, schema = cached[1], cached[2]
+    else:
+        df_raw = pd.read_csv(path)
+        schema = detect_schema(df_raw)
+        df = prepare(df_raw, schema)
+        _CACHE[path] = (mtime, df, schema)
 
-    df_raw = pd.read_csv(path)
-    schema = detect_schema(df_raw)
-    df = prepare(df_raw, schema)
-    _CACHE[path] = (mtime, df, schema)
+    if uid:
+        schema = attach_contract(uid, dataset, df, replace(schema))
     return df, schema
 
 

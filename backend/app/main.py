@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import routes_analysis, routes_auth, routes_data, routes_system
+from .api import routes_analysis, routes_auth, routes_data, routes_kpi, routes_system
 from .config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,6 +58,7 @@ app.add_middleware(
 app.include_router(routes_system.router)
 app.include_router(routes_auth.router)
 app.include_router(routes_data.router)
+app.include_router(routes_kpi.router)
 app.include_router(routes_analysis.router)
 
 

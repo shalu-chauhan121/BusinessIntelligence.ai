@@ -16,13 +16,22 @@ import numpy as np
 import pandas as pd
 
 from ..config import get_settings
+from .drivers import (
+    axis_weights,
+    cell_delta_grid,
+    rank_dimensions,
+    rank_drivers,
+    robust_sigma as _robust_sigma_impl,
+    shapley_dimension_attribution,
+)
 from .metrics import (
-    METRICS,
     DatasetSchema,
+    Resolver,
     compute,
     higher_is_better,
     metric_components,
     metric_label,
+    metric_spec,
     metric_unit,
     pct_change,
     safe,
@@ -79,20 +88,22 @@ def available_timeframes(df: pd.DataFrame) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # series
 # ---------------------------------------------------------------------------
-def quarterly_series(df: pd.DataFrame, metric: str) -> List[Dict[str, Any]]:
+def quarterly_series(df: pd.DataFrame, metric: str,
+                     resolver: Optional[Resolver] = None) -> List[Dict[str, Any]]:
     rows = []
     for (y, q), grp in df.groupby(["_year", "_quarter"]):
         rows.append({
             "year": int(y),
             "quarter": int(q),
             "period": f"{int(y)}-Q{int(q)}",
-            "value": safe(compute(grp, metric)),
+            "value": safe(compute(grp, metric, resolver)),
         })
     return sorted(rows, key=lambda r: (r["year"], r["quarter"]))
 
 
 def weekly_series(df: pd.DataFrame, metric: str, tf: Optional[Timeframe] = None,
-                  lookback_quarters: int = 2) -> List[Dict[str, Any]]:
+                  lookback_quarters: int = 2,
+                  resolver: Optional[Resolver] = None) -> List[Dict[str, Any]]:
     """Weekly series for the selected period plus a short run-up, for temporal checks."""
     frame = df
     if tf is not None:
@@ -105,7 +116,7 @@ def weekly_series(df: pd.DataFrame, metric: str, tf: Optional[Timeframe] = None,
             frame = df[(df["_date"] >= lo) & (df["_date"] <= hi)]
     rows = []
     for week, grp in frame.groupby("_week"):
-        rows.append({"week": str(week), "value": safe(compute(grp, metric))})
+        rows.append({"week": str(week), "value": safe(compute(grp, metric, resolver))})
     return sorted(rows, key=lambda r: r["week"])
 
 
@@ -113,15 +124,13 @@ def weekly_series(df: pd.DataFrame, metric: str, tf: Optional[Timeframe] = None,
 # significance
 # ---------------------------------------------------------------------------
 def _robust_sigma(values: np.ndarray) -> Tuple[float, float]:
-    """(median, robust sigma) using the median absolute deviation."""
-    if len(values) == 0:
-        return float("nan"), float("nan")
-    med = float(np.median(values))
-    mad = float(np.median(np.abs(values - med)))
-    sigma = 1.4826 * mad
-    if sigma <= 1e-9:                              # degenerate MAD -> fall back to std
-        sigma = float(np.std(values, ddof=1)) if len(values) > 1 else float("nan")
-    return med, sigma
+    """
+    (median, robust sigma) using the median absolute deviation.
+
+    Defined once in `drivers.robust_sigma` so the KPI's significance test and the
+    per-member significance test cannot drift apart.
+    """
+    return _robust_sigma_impl(values)
 
 
 def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
@@ -281,7 +290,8 @@ def assess_significance(series: List[Dict[str, Any]], tf: Timeframe,
 # driver decomposition
 # ---------------------------------------------------------------------------
 def decompose_dimension(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
-                        metric: str, max_items: int) -> List[Dict[str, Any]]:
+                        metric: str, max_items: int,
+                        resolver: Optional[Resolver] = None) -> List[Dict[str, Any]]:
     """
     Contribution of every member of a dimension to the KPI's change.
 
@@ -292,17 +302,17 @@ def decompose_dimension(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
       so a KPI can move because members got worse, or because the *mix* shifted
       toward weaker members. Those are different business problems.
     """
-    spec = METRICS.get(metric)
+    spec = metric_spec(metric, resolver)
     members = sorted(set(cur[dimension].dropna().unique()) | set(base[dimension].dropna().unique()))
     rows: List[Dict[str, Any]] = []
 
     if spec is None or spec.kind in ("sum", "mean"):
-        total_cur, total_base = compute(cur, metric), compute(base, metric)
+        total_cur, total_base = compute(cur, metric, resolver), compute(base, metric, resolver)
         total_delta = total_cur - total_base
         for m in members:
             c, b = cur[cur[dimension] == m], base[base[dimension] == m]
-            cv = compute(c, metric) if len(c) else 0.0
-            bv = compute(b, metric) if len(b) else 0.0
+            cv = compute(c, metric, resolver) if len(c) else 0.0
+            bv = compute(b, metric, resolver) if len(b) else 0.0
             cv = 0.0 if cv != cv else cv
             bv = 0.0 if bv != bv else bv
             delta = cv - bv
@@ -323,15 +333,15 @@ def decompose_dimension(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
                 "effects": None,
             })
     else:
-        num_c, den_c = metric_components(cur, metric)
-        num_b, den_b = metric_components(base, metric)
+        num_c, den_c = metric_components(cur, metric, resolver)
+        num_b, den_b = metric_components(base, metric, resolver)
         R_c = (num_c / den_c) if den_c else float("nan")
         R_b = (num_b / den_b) if den_b else float("nan")
         total_delta = (R_c - R_b) * spec.scale
         for m in members:
             c, b = cur[cur[dimension] == m], base[base[dimension] == m]
-            n_c, d_c = metric_components(c, metric) if len(c) else (0.0, 0.0)
-            n_b, d_b = metric_components(b, metric) if len(b) else (0.0, 0.0)
+            n_c, d_c = metric_components(c, metric, resolver) if len(c) else (0.0, 0.0)
+            n_b, d_b = metric_components(b, metric, resolver) if len(b) else (0.0, 0.0)
             r_c = (n_c / d_c) if d_c else 0.0
             r_b = (n_b / d_b) if d_b else 0.0
             w_c = (d_c / den_c) if den_c else 0.0
@@ -379,6 +389,7 @@ def decompose_dimension(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
 def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
             comparison: str = "previous_period") -> Dict[str, Any]:
     s = get_settings()
+    resolver = schema.contract_resolver
     cur = slice_period(df, tf)
     base_tf = tf.year_ago() if comparison == "year_over_year" else tf.previous()
     base = slice_period(df, base_tf)
@@ -386,35 +397,42 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
     if len(cur) == 0:
         raise ValueError(f"No rows found for {tf.pretty} in this dataset.")
 
-    cur_val = compute(cur, metric)
-    base_val = compute(base, metric) if len(base) else float("nan")
+    cur_val = compute(cur, metric, resolver)
+    base_val = compute(base, metric, resolver) if len(base) else float("nan")
     change_abs = cur_val - base_val if base_val == base_val else float("nan")
     change_pct = pct_change(cur_val, base_val)
 
-    series = quarterly_series(df, metric)
+    series = quarterly_series(df, metric, resolver)
     significance = assess_significance(series, tf, comparison)
 
     drivers: Dict[str, List[Dict[str, Any]]] = {}
     if len(base):
         for dim in schema.dimensions:
             if dim in df.columns:
-                drivers[dim] = decompose_dimension(cur, base, dim, metric, s.max_drivers_per_dimension)
+                drivers[dim] = decompose_dimension(cur, base, dim, metric,
+                                                  s.max_drivers_per_dimension, resolver)
 
-    top: List[Dict[str, Any]] = []
-    for dim, rows in drivers.items():
-        for r in rows:
-            if r.get("is_aggregate"):
-                continue
-            top.append({**r, "dimension": dim})
-    unfavourable = (change_abs or 0) < 0 if higher_is_better(metric) else (change_abs or 0) > 0
-    top = [t for t in top if t["contribution_pct"] is not None and t["contribution_pct"] > 0]
-    # A member that contributes in line with its own size is arithmetic, not a driver.
-    # Rank by how much it OVER-contributes, then by absolute contribution.
-    top.sort(key=lambda r: ((r.get("over_index") or 1.0) >= 1.2, r["contribution_pct"]), reverse=True)
-    for t in top:
-        oi = t.get("over_index")
-        t["is_disproportionate"] = bool(oi is not None and oi >= 1.2)
-    top = top[:6]
+    unfavourable = (change_abs or 0) < 0 if higher_is_better(metric, resolver) else (change_abs or 0) > 0
+
+    # Which dimension the movement is actually shaped by. Exact Shapley over the
+    # cell grid, so the interaction between two dimensions is split between them
+    # rather than counted once for each -- which is what reading the per-dimension
+    # decompositions side by side silently does. Computed BEFORE ranking, because
+    # it decides how much each dimension's members are allowed to count.
+    cells = cell_delta_grid(cur, base, schema.dimensions, metric, resolver) if len(base) else []
+    dimension_shapley = shapley_dimension_attribution(cells, [
+        d for d in schema.dimensions if d in cur.columns and d in base.columns
+    ]) if cells else {}
+    dimension_ranking = rank_dimensions(dimension_shapley) if dimension_shapley else []
+
+    # Ranking a member on contribution alone makes the biggest segment the
+    # "driver" of everything; ranking on over-index alone makes the noisiest
+    # small one the driver. `rank_drivers` scores four things together --
+    # contribution, over-index, the member's significance against its OWN
+    # history, and whether it stayed moved -- and publishes the arithmetic on
+    # every row. See docs/RANKING.md.
+    top = rank_drivers(drivers, df, metric, tf, resolver, limit=6,
+                       axis=axis_weights(dimension_shapley))
 
     concentration = None
     if drivers:
@@ -427,12 +445,15 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
     # so later stages have supporting/contradicting numbers available
     scoreboard = []
     for key in schema.available_kpis:
-        c, b = compute(cur, key), compute(base, key) if len(base) else float("nan")
+        c, b = compute(cur, key, resolver), compute(base, key, resolver) if len(base) else float("nan")
+        spec = metric_spec(key, resolver)
         scoreboard.append({
             "key": key,
-            "label": metric_label(key),
-            "unit": metric_unit(key),
-            "higher_is_better": higher_is_better(key),
+            "label": metric_label(key, resolver),
+            "unit": metric_unit(key, resolver),
+            "higher_is_better": higher_is_better(key, resolver),
+            "granularity": getattr(spec, "granularity_label", ""),
+            "kpi_status": getattr(spec, "status", ""),
             "current": safe(c),
             "baseline": safe(b),
             "change_pct": safe(pct_change(c, b)),
@@ -441,9 +462,11 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
 
     return {
         "kpi": metric,
-        "kpi_label": metric_label(metric),
-        "unit": metric_unit(metric),
-        "higher_is_better": higher_is_better(metric),
+        "kpi_label": metric_label(metric, resolver),
+        "unit": metric_unit(metric, resolver),
+        "higher_is_better": higher_is_better(metric, resolver),
+        "granularity": getattr(metric_spec(metric, resolver), "granularity_label", ""),
+        "contract_status": schema.contract_status,
         "timeframe": {"year": tf.year, "quarter": tf.quarter, "label": tf.label, "pretty": tf.pretty},
         "baseline_timeframe": {"year": base_tf.year, "quarter": base_tf.quarter,
                                "label": base_tf.label, "pretty": base_tf.pretty},
@@ -461,10 +484,12 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
         "significance": significance,
         "drivers": drivers,
         "top_drivers": top,
+        "dimension_shapley": dimension_shapley,
+        "dimension_ranking": dimension_ranking,
         "driver_concentration_pct": concentration,
         "series": {
             "quarterly": series,
-            "weekly": weekly_series(df, metric, tf, lookback_quarters=2),
+            "weekly": weekly_series(df, metric, tf, lookback_quarters=2, resolver=resolver),
         },
         "kpi_scoreboard": scoreboard,
         "rows_analysed": int(len(cur)),

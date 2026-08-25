@@ -1,0 +1,372 @@
+{
+  "dataset": "business_metrics_sample.csv",
+  "target": {
+    "kpi": "revenue",
+    "period": "2026-Q2",
+    "baseline": "2026-Q1",
+    "comparison": "previous_period"
+  },
+  "generated_from": "scripts/validate_rca.py",
+  "summary": {
+    "passed": 10,
+    "total": 10,
+    "all_passed": true
+  },
+  "checks": [
+    {
+      "check": "detection",
+      "pass": true,
+      "value": "meaningful_signal",
+      "bar": "meaningful_signal",
+      "detail": "verdict=meaningful_signal, change=-17.2%"
+    },
+    {
+      "check": "locus_recall",
+      "pass": true,
+      "value": 1.0,
+      "bar": 1.0,
+      "detail": "3/3 planted loci found"
+    },
+    {
+      "check": "precision_at_3",
+      "pass": true,
+      "value": 1.0,
+      "bar": 0.66,
+      "detail": "3/3 of the top 3 are planted loci: product=Product A, region=North, region=East"
+    },
+    {
+      "check": "rank_correlation",
+      "pass": true,
+      "value": 1.0,
+      "bar": 0.8,
+      "detail": "engine order supply_disruption_product_a(#1) < north_demand_erosion(#2) < east_demand_erosion(#3); true order by Shapley impact supply_disruption_product_a(#1) < north_demand_erosion(#2) < east_demand_erosion(#3)"
+    },
+    {
+      "check": "decomposition_exact",
+      "pass": true,
+      "value": 0.0005,
+      "bar": 0.01,
+      "detail": "worst gap 0.0005pp at region=West between the engine's contribution_pct and the same share recomputed by the generator"
+    },
+    {
+      "check": "attribution_mae",
+      "pass": true,
+      "value": 6.43,
+      "bar": 15.0,
+      "detail": "mean absolute error 6.4pp between the engine's share of the OBSERVED movement and each locus's true share of the PLANTED effect. The two denominators differ by natural drift (+262,105), which no engine should attribute to a factor."
+    },
+    {
+      "check": "onset_dating",
+      "pass": true,
+      "value": 2,
+      "bar": 2,
+      "detail": "supply_disruption_product_a planted 2026-05-04 detected 2026-04-20 (2w); north_demand_erosion planted 2026-04-06 detected 2026-04-06 (0w); east_demand_erosion planted 2026-05-18 detected 2026-05-04 (2w)"
+    },
+    {
+      "check": "temporal_ordering",
+      "pass": true,
+      "value": "kpi_precedes_cause",
+      "bar": "kpi_precedes_cause",
+      "detail": "revenue in North turned 2026-04-06, the Product A fulfilment signal turned 2026-05-04 -> kpi_precedes_cause (lag 4w). The revenue decline begins with the North erosion in early April; the supply disruption starts in May. A cause cannot explain a change that started before it."
+    },
+    {
+      "check": "mechanism_volume_led",
+      "pass": true,
+      "value": "volume_led",
+      "bar": "volume_led",
+      "detail": "volume effect -783,417 vs price effect +21,679"
+    },
+    {
+      "check": "weight_sensitivity",
+      "pass": true,
+      "value": "stable",
+      "bar": "top 3 unchanged under +/-50% on every weight",
+      "detail": "8/8 perturbations leave the top 3 unchanged"
+    }
+  ],
+  "ranked_drivers": [
+    {
+      "rank": 1,
+      "dimension": "product",
+      "name": "Product A",
+      "driver_score": 0.8638,
+      "member_score": 0.8638,
+      "axis_weight": 1.0,
+      "contribution_pct": 78.28434620347002,
+      "over_index": 1.8486653209567283,
+      "member_robust_z": -6.718,
+      "onset_week": "2026-04-20",
+      "weeks_outside_band": 12,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.7828,
+        "disproportion": 0.8487,
+        "significance": 1.0,
+        "persistence": 0.9231
+      }
+    },
+    {
+      "rank": 2,
+      "dimension": "region",
+      "name": "North",
+      "driver_score": 0.8248,
+      "member_score": 0.858,
+      "axis_weight": 0.9613,
+      "contribution_pct": 64.50252575745124,
+      "over_index": 2.2444612573056917,
+      "member_robust_z": -7.936,
+      "onset_week": "2026-04-06",
+      "weeks_outside_band": 13,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.645,
+        "disproportion": 1.0,
+        "significance": 1.0,
+        "persistence": 1.0
+      }
+    },
+    {
+      "rank": 3,
+      "dimension": "region",
+      "name": "East",
+      "driver_score": 0.3649,
+      "member_score": 0.3796,
+      "axis_weight": 0.9613,
+      "contribution_pct": 18.944326291369823,
+      "over_index": 0.9257554274679846,
+      "member_robust_z": -4.01,
+      "onset_week": "2026-05-04",
+      "weeks_outside_band": 9,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.1894,
+        "disproportion": 0.0,
+        "significance": 1.0,
+        "persistence": 0.6923
+      }
+    },
+    {
+      "rank": 4,
+      "dimension": "product",
+      "name": "Product C",
+      "driver_score": 0.2644,
+      "member_score": 0.2644,
+      "axis_weight": 1.0,
+      "contribution_pct": 13.770859982101696,
+      "over_index": 0.3860964332212855,
+      "member_robust_z": -1.939,
+      "onset_week": "2026-04-27",
+      "weeks_outside_band": 10,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.1377,
+        "disproportion": 0.0,
+        "significance": 0.4697,
+        "persistence": 0.7692
+      }
+    },
+    {
+      "rank": 5,
+      "dimension": "product",
+      "name": "Product B",
+      "driver_score": 0.2318,
+      "member_score": 0.2318,
+      "axis_weight": 1.0,
+      "contribution_pct": 7.944793814428253,
+      "over_index": 0.36134554095886756,
+      "member_robust_z": -1.731,
+      "onset_week": "2026-04-20",
+      "weeks_outside_band": 11,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.0794,
+        "disproportion": 0.0,
+        "significance": 0.3655,
+        "persistence": 0.8462
+      }
+    },
+    {
+      "rank": 6,
+      "dimension": "region",
+      "name": "West",
+      "driver_score": 0.1759,
+      "member_score": 0.183,
+      "axis_weight": 0.9613,
+      "contribution_pct": 9.32949726285746,
+      "over_index": 0.34400355393130105,
+      "member_robust_z": -1.533,
+      "onset_week": "2026-05-04",
+      "weeks_outside_band": 8,
+      "weeks_in_period": 13,
+      "score_components": {
+        "magnitude": 0.0933,
+        "disproportion": 0.0,
+        "significance": 0.2666,
+        "persistence": 0.6154
+      }
+    }
+  ],
+  "dimension_shapley": [
+    {
+      "dimension": "product",
+      "phi": 11787404133.93415,
+      "share": 0.4743464257978916,
+      "rank": 1
+    },
+    {
+      "dimension": "region",
+      "phi": 11331616479.939434,
+      "share": 0.45600470762664563,
+      "rank": 2
+    },
+    {
+      "dimension": "segment",
+      "phi": 961532091.9242041,
+      "share": 0.038693787530468655,
+      "rank": 3
+    },
+    {
+      "dimension": "channel",
+      "phi": 769226891.690947,
+      "share": 0.030955079044994165,
+      "rank": 4
+    }
+  ],
+  "detail": {
+    "found": {
+      "supply_disruption_product_a": 1,
+      "north_demand_erosion": 2,
+      "east_demand_erosion": 3
+    },
+    "attribution": [
+      {
+        "factor": "supply_disruption_product_a",
+        "engine_contribution_pct": 78.28434620347002,
+        "true_planted_share_pct": 68.787,
+        "error_pp": 9.497346203470016
+      },
+      {
+        "factor": "north_demand_erosion",
+        "engine_contribution_pct": 64.50252575745124,
+        "true_planted_share_pct": 55.507,
+        "error_pp": 8.99552575745124
+      },
+      {
+        "factor": "east_demand_erosion",
+        "engine_contribution_pct": 18.944326291369823,
+        "true_planted_share_pct": 19.728,
+        "error_pp": 0.7836737086301788
+      }
+    ],
+    "onsets": [
+      {
+        "factor": "supply_disruption_product_a",
+        "planted": "2026-05-04",
+        "detected": "2026-04-20",
+        "error_weeks": 2
+      },
+      {
+        "factor": "north_demand_erosion",
+        "planted": "2026-04-06",
+        "detected": "2026-04-06",
+        "error_weeks": 0
+      },
+      {
+        "factor": "east_demand_erosion",
+        "planted": "2026-05-18",
+        "detected": "2026-05-04",
+        "error_weeks": 2
+      }
+    ]
+  },
+  "weight_sensitivity": {
+    "stable": true,
+    "variants": [
+      {
+        "weight": "magnitude",
+        "scale": 0.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "magnitude",
+        "scale": 1.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "disproportion",
+        "scale": 0.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "disproportion",
+        "scale": 1.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "significance",
+        "scale": 0.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "significance",
+        "scale": 1.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "persistence",
+        "scale": 0.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      },
+      {
+        "weight": "persistence",
+        "scale": 1.5,
+        "top3_unchanged": true,
+        "top3": [
+          "product=Product A",
+          "region=North",
+          "region=East"
+        ]
+      }
+    ],
+    "baseline_top3": [
+      "product=Product A",
+      "region=East",
+      "region=North"
+    ]
+  }
+}

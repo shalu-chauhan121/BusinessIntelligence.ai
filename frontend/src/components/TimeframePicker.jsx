@@ -14,6 +14,10 @@ export default function TimeframePicker({
   kpiOptions = [],
   onChange,
   busy = false,
+  // The dashboard still browses by KPI, which is a legitimate way to look
+  // around. Investigation no longer starts from a dropdown — a question names
+  // the measure — so it hides this column rather than offering two entry points.
+  showKpi = true,
 }) {
   const years = [...new Set(timeframes.map((t) => t.year))].sort((a, b) => b - a)
   const quarters = timeframes.filter((t) => t.year === Number(year)).map((t) => t.quarter).sort()
@@ -24,7 +28,7 @@ export default function TimeframePicker({
         <CalendarRange className="h-3.5 w-3.5" aria-hidden />
         Analysis period
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={`grid gap-3 sm:grid-cols-2 ${showKpi ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
         <div>
           <label className="label" htmlFor="tf-year">Year</label>
           <select
@@ -56,20 +60,25 @@ export default function TimeframePicker({
           </select>
         </div>
 
-        <div>
-          <label className="label" htmlFor="tf-kpi">KPI</label>
-          <select
-            id="tf-kpi"
-            className="field"
-            value={kpi ?? ''}
-            disabled={busy || !kpiOptions.length}
-            onChange={(e) => onChange({ kpi: e.target.value })}
-          >
-            {kpiOptions.map((k) => (
-              <option key={k.key} value={k.key}>{k.label}</option>
-            ))}
-          </select>
-        </div>
+        {showKpi ? (
+          <div>
+            <label className="label" htmlFor="tf-kpi">KPI</label>
+            <select
+              id="tf-kpi"
+              className="field"
+              value={kpi ?? ''}
+              disabled={busy || !kpiOptions.length}
+              onChange={(e) => onChange({ kpi: e.target.value })}
+            >
+              {kpiOptions.map((k) => (
+                <option key={k.key} value={k.key}>
+                  {k.label}
+                  {k.granularity ? ` · ${k.granularity}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
 
         <div>
           <label className="label" htmlFor="tf-comparison">Compare with</label>

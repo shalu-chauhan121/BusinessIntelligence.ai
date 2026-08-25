@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
 const KEY = 'bi-analysis-settings'
-const DEFAULTS = { year: null, quarter: null, kpi: 'revenue', comparison: 'previous_period' }
+// kpi: null lets the backend pick the active dataset's own default KPI
+// (pipeline.default_kpi) instead of assuming every dataset has 'revenue'.
+const DEFAULTS = { year: null, quarter: null, kpi: null, comparison: 'previous_period' }
 
 /**
  * The timeframe/KPI selection, shared between the dashboard and the

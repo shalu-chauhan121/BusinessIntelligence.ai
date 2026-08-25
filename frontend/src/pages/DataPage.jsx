@@ -1,37 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CheckCircle2, Download, FileSpreadsheet, Sparkles, Trash2, Upload } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import {
+  ArrowRight,
+  CheckCircle2,
+  CircleSlash,
+  Download,
+  FileSpreadsheet,
+  Sparkles,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { Badge, Callout, ErrorState, LoadingCard, SectionTitle, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { titleCase } from '../lib/format'
 
-const REQUIRED = [
-  ['date', 'YYYY-MM-DD', 'Required', 'Period start date. Weekly rows (one per Monday) work best.'],
-  ['revenue', 'number', 'Recommended', 'The default headline KPI.'],
-]
-
-const DIMENSIONS = [
-  ['region', 'North, South, East, West'],
-  ['product', 'Product A, Product B'],
-  ['channel', 'Online, Retail Partner'],
-  ['segment', 'Enterprise, SMB'],
-]
-
-const METRICS = [
-  ['units_sold', 'sum', 'Volume, for the price-versus-volume split'],
-  ['orders', 'sum', 'Demand signal'],
-  ['customers', 'sum', 'Demand signal and acquisition cost'],
-  ['fulfilled_orders', 'sum', 'Fulfilment rate'],
-  ['stockout_events', 'sum', 'Stockout rate — supply hypotheses'],
-  ['inventory_units', 'average', 'Inventory position — supply hypotheses'],
-  ['cost_of_goods', 'sum', 'Gross margin'],
-  ['marketing_spend', 'sum', 'Acquisition cost and marketing hypotheses'],
-  ['returns', 'sum', 'Quality signal'],
-  ['support_tickets', 'sum', 'Service-load signal'],
-]
-
 export default function DataPage() {
   const [datasets, setDatasets] = useState(null)
   const [active, setActive] = useState(null)
+  const [library, setLibrary] = useState(null)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null)
@@ -48,8 +34,14 @@ export default function DataPage() {
         } catch {
           setActive(null)
         }
+        try {
+          setLibrary(await api.kpiLibrary())
+        } catch {
+          setLibrary(null)
+        }
       } else {
         setActive(null)
+        setLibrary(null)
       }
     } catch (e) {
       setError(e)
@@ -172,6 +164,20 @@ export default function DataPage() {
         </div>
       </div>
 
+      {active ? (
+        <Callout tone="info" title="KPIs are defined by the KPI contract">
+          <p>
+            {active.schema.available_kpis?.length ?? 0} KPIs are currently authoritative for this
+            dataset. Review what the system discovered, set each KPI's granularity, override a
+            definition or add one of your own before relying on the analysis.
+          </p>
+          <Link className="btn-ghost mt-2 inline-flex" to="/kpi">
+            Open the KPI contract
+            <ArrowRight className="h-4 w-4" aria-hidden />
+          </Link>
+        </Callout>
+      ) : null}
+
       {datasets?.length ? (
         <section>
           <SectionTitle title="Uploaded datasets" description="Only the active dataset is analysed." />
@@ -216,30 +222,91 @@ export default function DataPage() {
 
       <section>
         <SectionTitle
-          title="Format reference"
-          description="Any additional text column is treated as another dimension; any additional numeric column becomes an extra KPI."
+          title="What the system understood about your data"
+          description="Nothing here is hard-coded to one kind of business. Column names are matched to KPI concepts, so net_sales, turnover and revenue all mean the same thing — and a KPI only appears when the data can actually support it."
         />
-        <div className="grid gap-4 lg:grid-cols-3">
-          <FormatTable
-            title="Required"
-            head={['Column', 'Type', 'Notes']}
-            rows={REQUIRED.map(([c, t, , n]) => [c, t, n])}
-          />
-          <FormatTable title="Dimension columns" head={['Column', 'Example values']} rows={DIMENSIONS} />
-          <FormatTable title="Metric columns" head={['Column', 'Aggregated', 'Enables']} rows={METRICS} />
-        </div>
+        {library ? (
+          <LibraryReport library={library} />
+        ) : (
+          <Callout tone="info" title="Upload a dataset to see this">
+            Once a dataset is active, this shows exactly which KPIs it supports and which it does
+            not — with the reason for each.
+          </Callout>
+        )}
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
-          <Callout tone="info" title="Derived KPIs — do not upload these">
-            Gross margin %, average order value, average selling price, fulfilment rate, stockout rate, return rate,
-            customer acquisition cost, units per order and support tickets per 1,000 orders are all computed for you
-            from the columns above.
+          <Callout tone="info" title="The only column that is genuinely required">
+            A date column, formatted <span className="font-mono">YYYY-MM-DD</span>. Everything else
+            is discovered: numeric columns become measures, text columns become dimensions you can
+            slice by, and derived KPIs are proposed from the combinations that are meaningful.
           </Callout>
           <Callout tone="warning" title="How much history to provide">
-            The significance test compares the selected quarter against its own history. Five quarters is the minimum;
-            eight or more lets the system model seasonality and tell a real signal from a seasonal one.
+            The significance test compares the selected quarter against its own history. Five
+            quarters is the minimum; eight or more lets the system model seasonality and tell a real
+            signal from a seasonal one.
           </Callout>
         </div>
       </section>
+    </div>
+  )
+}
+
+/**
+ * Which library KPIs bound to this dataset, and why the rest did not.
+ *
+ * The unavailable list matters as much as the available one: it is the evidence
+ * that a KPI is missing because the data cannot support it, rather than because
+ * nothing looked for it.
+ */
+function LibraryReport({ library }) {
+  const bound = library.filter((e) => e.bound)
+  const unavailable = library.filter((e) => !e.bound)
+  const byDomain = {}
+  bound.forEach((e) => {
+    byDomain[e.domain] = byDomain[e.domain] || []
+    byDomain[e.domain].push(e)
+  })
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <div className="card card-pad">
+        <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted">
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+          Available in your data ({bound.length})
+        </div>
+        {Object.entries(byDomain).map(([domain, entries]) => (
+          <div key={domain} className="mb-3">
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-muted">
+              {domain.replace(/_/g, ' ')}
+            </div>
+            <ul className="space-y-1 text-xs">
+              {entries.map((e) => (
+                <li key={e.id} className="flex justify-between gap-3">
+                  <span className="truncate text-ink">{e.name}</span>
+                  <span className="shrink-0 text-ink-muted">{e.unit}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+      <div className="card card-pad">
+        <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted">
+          <CircleSlash className="h-3.5 w-3.5" aria-hidden />
+          Considered, but not available ({unavailable.length})
+        </div>
+        <ul className="space-y-1 text-xs text-ink-muted">
+          {unavailable.slice(0, 14).map((e) => (
+            <li key={e.id}>
+              · <span className="text-ink-secondary">{e.name}</span> — {e.why_unavailable}
+            </li>
+          ))}
+          {unavailable.length > 14 ? <li>· and {unavailable.length - 14} more</li> : null}
+        </ul>
+        <p className="mt-2 text-xs text-ink-muted">
+          Add the columns these need and they become available. They are never invented.
+        </p>
+      </div>
     </div>
   )
 }
@@ -249,34 +316,6 @@ function Row({ k, v }) {
     <div className="flex justify-between gap-3">
       <dt className="text-ink-muted">{k}</dt>
       <dd className="truncate text-right text-ink-secondary">{v ?? '—'}</dd>
-    </div>
-  )
-}
-
-function FormatTable({ title, head, rows }) {
-  return (
-    <div className="card card-pad">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-muted">{title}</div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="text-ink-muted">
-            <tr>
-              {head.map((h) => (
-                <th key={h} className="py-1 pr-3 font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="text-ink-secondary">
-            {rows.map((r) => (
-              <tr key={r[0]}>
-                {r.map((cell, i) => (
-                  <td key={i} className={`py-1 pr-3 ${i === 0 ? 'font-mono text-ink' : ''}`}>{cell}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   )
 }

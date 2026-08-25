@@ -1,26 +1,50 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Database, Play, Quote, Sparkles } from 'lucide-react'
+import { Database, Quote, Sparkles } from 'lucide-react'
 import TrendChart from '../components/charts/TrendChart'
 import DriverChart from '../components/charts/DriverChart'
+import ClarificationPrompt from '../components/ClarificationPrompt'
 import HypothesisCard from '../components/HypothesisCard'
+import IntentPanel from '../components/IntentPanel'
+import QuestionBar from '../components/QuestionBar'
 import Recommendations from '../components/Recommendations'
-import TimeframePicker from '../components/TimeframePicker'
 import { AnalystOnly, Badge, Callout, EmptyState, ErrorState, LoadingCard, SectionTitle, Spinner } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
-import useAnalysisSettings from '../hooks/useAnalysisSettings'
 import { api } from '../lib/api'
 import { STAGES, VERDICT_COPY, formatDelta, formatValue, titleCase } from '../lib/format'
+
+/**
+ * Example questions, built from the KPIs this dataset actually has.
+ *
+ * Generic examples are worse than useless on an unfamiliar dataset — a hospital
+ * user offered "why did revenue fall" learns nothing about what they can ask.
+ */
+function exampleQuestions(meta) {
+  const catalogue = meta?.schema?.kpi_catalogue || []
+  if (!catalogue.length) return []
+  const [first, second] = catalogue
+  const examples = []
+  if (first) examples.push(`Why did ${first.label.toLowerCase()} change last quarter?`)
+  if (first && second) {
+    examples.push(
+      `Why did ${first.label.toLowerCase()} fall even though ${second.label.toLowerCase()} rose?`
+    )
+  }
+  return examples
+}
 
 export default function InvestigationPage() {
   const { investigationId } = useParams()
   const { isAnalyst } = useAuth()
-  const [settings, update] = useAnalysisSettings()
   const [stage, setStage] = useState('observe')
   const [meta, setMeta] = useState(null)
+  const [question, setQuestion] = useState('')
   const [result, setResult] = useState(null)
+  const [clarification, setClarification] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+
+  const examples = useMemo(() => exampleQuestions(meta), [meta])
 
   useEffect(() => {
     api.activeDataset().then(setMeta).catch((e) => setError(e))
@@ -33,32 +57,42 @@ export default function InvestigationPage() {
       .getInvestigation(investigationId)
       .then((data) => {
         setResult(data)
+        setQuestion(data.question || '')
         setStage('act')
       })
       .catch(setError)
       .finally(() => setBusy(false))
   }, [investigationId])
 
-  const run = useCallback(async () => {
+  const ask = useCallback(async (asked) => {
+    const text = (asked ?? question).trim()
+    if (!text) return
     setBusy(true)
     setError(null)
+    setClarification(null)
+    setQuestion(text)
     try {
-      const data = await api.runInvestigation({
-        kpi: settings.kpi,
-        year: settings.year,
-        quarter: settings.quarter,
-        comparison: settings.comparison,
-        use_llm: true,
-        persist: true,
-      })
-      setResult(data)
-      setStage('observe')
+      const data = await api.askQuestion({ question: text, use_llm: true, persist: true })
+      // An unresolvable question is a normal branch, not a failure: the server
+      // returns what it needs settled rather than investigating something near.
+      if (data.status === 'needs_clarification') {
+        setClarification(data)
+        setResult(null)
+      } else {
+        setResult(data)
+        setClarification(null)
+        setStage('observe')
+      }
     } catch (e) {
       setError(e)
     } finally {
       setBusy(false)
     }
-  }, [settings])
+  }, [question])
+
+  const askAbout = useCallback((candidate) => {
+    ask(`Why did ${(candidate.label || candidate.kpi_key).toLowerCase()} change?`)
+  }, [ask])
 
   if (error && error.status === 409) {
     return (
@@ -78,56 +112,55 @@ export default function InvestigationPage() {
   return (
     <div className="space-y-5">
       <SectionTitle
-        eyebrow="Four-stage investigation"
-        title="Observe → Investigate → Contest → Act"
-        description="Each stage answers a different question. They are kept separate on purpose: proposing an explanation and trying to break it are not the same job."
-        right={
-          <button type="button" className="btn-primary" onClick={run} disabled={busy}>
-            {busy ? <Spinner label="Running…" /> : (
-              <>
-                <Play className="h-4 w-4" aria-hidden />
-                Run investigation
-              </>
-            )}
-          </button>
-        }
+        eyebrow="Question-driven investigation"
+        title="Ask a business question"
+        description="Ask what you actually want to know. The system works out which KPI you mean from your dataset's contract, establishes what changed, proposes explanations for a business of this kind, and then tries to break each one."
       />
 
-      {meta ? (
-        <TimeframePicker
-          timeframes={meta.timeframes}
-          year={settings.year ?? meta.timeframes?.at(-1)?.year}
-          quarter={settings.quarter ?? meta.timeframes?.at(-1)?.quarter}
-          kpi={settings.kpi}
-          kpiOptions={meta.schema?.kpi_catalogue || []}
-          comparison={settings.comparison}
-          onChange={update}
+      <QuestionBar
+        value={question}
+        onChange={setQuestion}
+        onSubmit={ask}
+        busy={busy}
+        examples={examples}
+      />
+
+      {error && error.status !== 409 ? (
+        <ErrorState
+          title="The investigation could not be completed"
+          message={error.message}
+          onRetry={() => ask()}
+        />
+      ) : null}
+
+      {clarification ? (
+        <ClarificationPrompt
+          ambiguities={clarification.ambiguities}
+          onChoose={askAbout}
           busy={busy}
         />
       ) : null}
 
-      {error && error.status !== 409 ? (
-        <ErrorState title="The investigation could not be completed" message={error.message} onRetry={run} />
-      ) : null}
+      {busy && !result ? <LoadingCard label="Understanding, observing, investigating, contesting and acting…" lines={6} /> : null}
 
-      {busy && !result ? <LoadingCard label="Observing, investigating, contesting and acting…" lines={6} /> : null}
-
-      {!result && !busy ? (
+      {!result && !busy && !clarification ? (
         <EmptyState
           icon={Sparkles}
-          title="Ready when you are"
-          message="Pick a KPI and a quarter above, then run the investigation. Every number in the result is computed from your uploaded data, and every quotation comes from a document you uploaded."
-          action={
-            <button type="button" className="btn-primary" onClick={run}>
-              <Play className="h-4 w-4" aria-hidden />
-              Run investigation
-            </button>
-          }
+          title="Ask anything about this data"
+          message="Describe what happened and what puzzles you about it. Every number in the answer is computed from your uploaded data, and every quotation comes from a document you uploaded."
         />
       ) : null}
 
       {result ? (
         <>
+          <IntentPanel
+            intent={result.intent}
+            assumptions={result.assumptions}
+            onCorrect={() => {
+              setResult(null)
+              setClarification(null)
+            }}
+          />
           <StageNav stage={stage} setStage={setStage} result={result} />
           {stage === 'observe' ? <ObserveStage result={result} isAnalyst={isAnalyst} /> : null}
           {stage === 'investigate' ? <InvestigateStage result={result} isAnalyst={isAnalyst} /> : null}
@@ -408,9 +441,45 @@ function ActStage({ result }) {
   const act = result.act
   const n = act.narrative
   const story = act.llm_story && !act.llm_story.error ? act.llm_story : null
+  // The reader's own framing. The evidence and ranking behind it are identical
+  // for every persona; what changes is the emphasis and what is advised.
+  const view = act.persona_view
 
   return (
     <div className="space-y-4">
+      {view ? (
+        <div className="card card-pad">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
+              Written for you
+            </div>
+            <Badge tone="info">{view.persona_label}</Badge>
+          </div>
+          <p className="mt-2 text-sm text-ink-secondary">{view.summary}</p>
+
+          {view.recommendations?.length ? (
+            <ul className="mt-4 space-y-3">
+              {view.recommendations.map((r, i) => (
+                <li key={i} className="border-l-2 border-sky-500/50 pl-3">
+                  <p className="text-sm font-medium text-ink">{r.action}</p>
+                  <p className="mt-0.5 text-xs text-ink-muted">{r.why}</p>
+                  <p className="mt-1 text-xs text-ink-muted">
+                    {r.owner ? <span>{r.owner}</span> : null}
+                    {r.timeframe ? <span> · {r.timeframe}</span> : null}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {view.question_to_ask ? (
+            <p className="mt-4 text-xs italic text-ink-muted">
+              Worth asking: {view.question_to_ask}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="card card-pad">
         <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Executive summary</div>
         <h3 className="mt-1 text-lg font-semibold text-ink">{n.headline}</h3>

@@ -30,30 +30,54 @@ One CSV. One row per **time period × business dimensions**. Weekly rows are rec
 
 Any other text column is treated as an additional dimension automatically.
 
-### Metric columns recognised out of the box
+### Metric columns
 
-| Column | Aggregation | Used for |
+**Nothing is hard-coded to one kind of business.** Column names are matched to KPI
+*concepts*, so `revenue`, `net_sales`, `turnover` and `billed_amount` all mean the
+same thing, and a hospital's `admissions`, `recovered_patients` and `bed_days` are
+understood just as well as a retailer's `orders` and `stockout_events`.
+
+What the system works out for each numeric column:
+
+| It infers | From | Why it matters |
 |---|---|---|
-| `revenue` | sum | headline KPI, driver decomposition |
-| `units_sold` | sum | volume vs price decomposition |
-| `orders` | sum | demand signal |
-| `customers` | sum | demand signal, CAC |
-| `fulfilled_orders` | sum | fulfilment rate |
-| `stockout_events` | sum | stockout rate (supply hypotheses) |
-| `inventory_units` | mean (stock level) | inventory cover (supply hypotheses) |
-| `cost_of_goods` | sum | gross margin |
-| `marketing_spend` | sum | CAC, marketing efficiency |
-| `returns` | sum | quality signal |
-| `support_tickets` | sum | quality / experience signal |
+| semantic type | name tokens + the values | money, count, rate, duration, score |
+| additivity | name + distribution | a **flow** is summed; a **stock** like `inventory_units` is averaged, because twelve month-end levels do not add up to an annual level |
+| containment | the actual rows | `recovered ≤ discharges` is what makes recovery rate a real rate; `orders ≤ revenue` is arithmetic and means nothing |
 
-Unknown numeric columns are still ingested and summed — they appear as extra KPIs and can
-be used as evidence, they just have no pre-built hypothesis attached to them.
+Concepts the shipped library knows include revenue, cost, orders, customers,
+units, marketing spend, fulfilled orders, stockouts, inventory, returns and
+support tickets (general and retail), plus packs for healthcare, logistics,
+subscription and manufacturing.
+
+**A KPI only appears when your data can actually support it.** Where a concept
+does not bind, the KPI is listed as unavailable with the reason — it is never
+invented. The Business data page shows both lists for your file.
 
 ### Derived KPIs (computed for you, never uploaded)
 
-`gross_margin_pct`, `avg_order_value`, `avg_selling_price`, `fulfillment_rate`,
-`stockout_rate`, `return_rate`, `customer_acquisition_cost`, `units_per_order`,
-`tickets_per_1k_orders`.
+Derived KPIs are proposed from combinations that are *semantically* valid, not
+merely computable:
+
+* `revenue` + `cost` → gross profit and gross margin %
+* an outcome contained by a population → a rate (recovery rate, return rate,
+  fulfilment rate, on-time delivery rate)
+* money ÷ a population → unit economics (average order value, cost per admission)
+* a duration → an average (average length of stay)
+
+`revenue / cost_of_goods` is *not* proposed: cost is a component of revenue, so
+the meaningful KPI for that pair is a margin, not a coverage multiple.
+
+### Reviewing and overriding the definitions
+
+Everything discovered is a **proposal**. On the **KPI contract** page you confirm
+each KPI's granularity, edit any definition, add metrics your organisation uses
+that the data cannot imply, resolve anything the system flagged as ambiguous, and
+approve. Only approved KPIs are authoritative for the analysis.
+
+Granularity matters more than it looks: two KPIs at different grains must not be
+compared or aggregated together, and a rate must be recomputed from its numerator
+and denominator at every level rather than averaged.
 
 ### Minimum history
 
