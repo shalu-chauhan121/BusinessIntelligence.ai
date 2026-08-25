@@ -28,20 +28,123 @@ The model improves the writing, not the conclusions. That is what makes the outp
 
 ---
 
-## 2. The four stages
+## 2. The stages
 
 They are separate because each answers a different question, and because merging them is
 exactly how a plausible-but-wrong explanation survives.
 
 ```
-OBSERVE        What actually changed?          deterministic statistics
+UNDERSTAND     What is being asked?            question -> KPI contract  (app/query/)
    │
+OBSERVE        What actually changed?          deterministic statistics
+   │           ── material-signal boundary ──  only real movements pass here
 INVESTIGATE    What could explain it?          competing hypotheses + evidence
    │
 CONTEST        What would disprove it?         adversarial checks
    │
 ACT            What should we do?              recommendations + monitoring
+                                               reframed per persona
 ```
+
+### Stage −1 — UNDERSTAND (`app/query/`)
+
+An investigation starts from a business question, not a KPI dropdown. Grounding is deterministic
+first: KPI names, semantic tags and the concept library's field aliases resolve most questions with
+no model involved. A model is consulted only when that is genuinely ambiguous, and the key it
+returns is validated against the resolver — **it may choose among the KPIs that exist and cannot
+introduce one.**
+
+Where the reading is uncertain the system says so rather than guessing. An unresolvable KPI, or a
+period the dataset does not hold, blocks and asks; a merely vague period proceeds on a stated
+default and discloses it. Investigating the nearest KPI would produce a confident answer to a
+question nobody asked.
+
+### The material-signal boundary (`app/engines/signals.py`)
+
+Everything a model learns about the numbers passes through `material_signals`. A model handed the
+full observation sees every KPI that wobbled by a percent and will, reliably, explain each one.
+Only movements a deterministic significance test already called real are offered as findings;
+anything else is carried as context flagged `moved: false` — which is what makes
+*"why did occupancy fall even though admissions were flat"* answerable. When nothing is material,
+no hypotheses are generated at all.
+
+### Where hypotheses come from
+
+The retail template library is gone. It could not do the job: a template written around orders,
+stockouts and discounting fired on any dataset with a dimension column, so a hospital's declining
+margin was explained as a competitor taking volume. Two sources replace it, both measured by the
+same machinery:
+
+- **contract-derived, deterministic** — a ratio cannot move unless its numerator or denominator
+  moved; an additive KPI moves with its terms; a change concentrated in one dimension member is
+  localised. True of every business, needs no model, always available.
+- **domain-aware, model-proposed** — mechanisms specific to how this kind of operation works, asked
+  for in both a domain-specific and a general-business category, neither forced.
+
+**Neither source asserts evidence.** Both emit *predictions* — this metric should have moved this
+way — and `hypotheses.evidence(..., expect=)` measures each against the data and flips a prediction
+that did not hold into evidence *against* the hypothesis that made it. A hypothesis cannot claim
+support it does not have, however plausible its wording. A prediction naming a metric the dataset
+does not measure is dropped, and a hypothesis left with none is discarded: this is why a hospital
+can no longer be told about competitor pricing, and why that is now structural rather than
+discouraged.
+
+### Stage 0 — the KPI CONTRACT (`app/kpi/`)
+
+Before any stage can run, the system has to know what a KPI *is*. That used to be
+a frozen 20-entry dictionary matched to uploaded columns by literal name, which
+meant a hospital dataset got a retail dashboard. The KPI Contract replaces it.
+
+```
+profiling  -> what does each column MEAN?      semantic type, additivity, containment
+library    -> which broadly applicable KPIs does this data support?   binds on CONCEPT
+derivation -> which derived KPIs are semantically valid?              typed rules + data checks
+screening  -> (optional) a model judges semantics; it never computes
+conflicts  -> what is ambiguous, and must a human decide?
+contract   -> the artefact: one versioned, approved document per (user, dataset)
+resolver   -> the artefact, compiled into something that computes
+```
+
+* **Concept binding, not column names.** A library entry declares the concepts it
+  needs (`revenue`, `cost`) with aliases and a required semantic type, so
+  `net_sales`, `turnover` and `billed_amount` all satisfy revenue. **An entry
+  activates only when every concept binds to a real field** — the reason a
+  hospital dataset never grows a gross-margin tile, and the reason the absence is
+  reported (`no field matched the concept 'revenue'`) rather than silent.
+* **Computable is not meaningful.** Any two numeric columns can be divided.
+  A rate is only proposed where the numerator is genuinely contained by the
+  denominator *on the actual rows*, and where the denominator reads as a
+  population rather than as another measure that happens to be bigger. That is
+  what separates `recovered / discharges` from `orders / revenue`. Combinations
+  the rules decline are returned with the reason, so a user can see the system
+  considered them.
+* **Granularity is first-class.** Every KPI declares its entity grain, time grain,
+  native row grain and roll-up policy. A ratio's policy is
+  `recompute_from_components`, never `mean`: averaging four weekly margins is not
+  the quarterly margin. A grain that was inferred but not confirmed blocks
+  approval, because a KPI compared at the wrong grain is simply wrong.
+* **Ambiguity is never silently resolved.** Two definitions of one name, a
+  concept two columns match equally well, a hierarchy whose members roll up to
+  two parents, a rate whose containment fails on the rows — each becomes a
+  `blocking` conflict that prevents approval until a person chooses and records
+  why. The rationale lands in the provenance of every KPI it touched.
+* **Formulas are parsed, never executed.** Definitions arrive from the API as
+  text and are compiled into a small typed AST over an allowlist of column names.
+  There is no `eval`.
+* **The LLM judges, it does not compute.** Screening sees column names, semantic
+  types and summary statistics — never a row. Every proposal it makes is
+  re-validated against the field list; one naming a column that does not exist is
+  discarded. With no API key the deterministic rules decide alone and everything
+  is marked for review.
+
+**Migration.** A dataset with no contract is given a `provisional` one generated
+from the library, marked as never reviewed. The test suite asserts it reproduces
+the old registry's numbers value-for-value, for every KPI in every quarter, so
+making the contract the source of truth changed no number anywhere.
+
+**A draft is not live.** Approving one KPI inside a draft does not change what the
+dashboard shows; the draft goes live only when the contract as a whole is
+approved, which is also when every blocking conflict must have been resolved.
 
 ### Stage 1 — OBSERVE (`app/engines/observe.py`)
 
@@ -163,9 +266,14 @@ app/
   main.py       application, CORS, routers
   config.py     pydantic-settings; every value has a working default
   deps.py       current_identity → current_user → require_analyst / active_dataset
-  api/          routes_auth · routes_data · routes_analysis · routes_system · redact
-  services/     dataset_service (load + cache) · pipeline (stage orchestration)
+  api/          routes_auth · routes_data · routes_kpi · routes_analysis · routes_system · redact
+  kpi/          contract · profiling · library · derivation · screening · conflicts · resolver · service
+  services/     dataset_service (load + cache + contract) · pipeline (stage orchestration)
 ```
+
+`app/kpi/` depends on nothing in `app/engines/`, so the dependency runs one way:
+the engines resolve KPIs through a compiled contract, and the contract layer knows
+nothing about the four stages.
 
 The pipeline is a **plain deterministic sequence**, not an agent loop. The order of the stages
 is the product's core idea; leaving it to a model to decide would be handing away the thing
@@ -191,8 +299,13 @@ app/db/
   base.py          Collection / DocumentStore interfaces + filter evaluation
   json_store.py    file-backed, atomic writes, thread-safe   (default)
   mongo_store.py   pymongo against a local mongod or Atlas
-  repositories.py  Users · Datasets · Documents · Investigations
+  repositories.py  Users · Datasets · Documents · Investigations · KpiContracts
 ```
+
+KPI contracts are versioned the way datasets are activated: a new document per
+version with `is_current` flipped, never mutation in place. The version that
+produced a saved investigation is still on disk, so an approval is auditable and
+reversible.
 
 **Why a JSON store by default.** A judge, a teammate, or a fresh laptop can run the project
 with `pip install -r requirements.txt` and nothing else. No database server, no connection
@@ -240,6 +353,26 @@ roles:
 | Retrieval inspector | ❌ | ✅ |
 
 Doing this on the server is what makes it authorisation rather than presentation.
+
+### Personas are the presentation half, and are not authorisation
+
+Role decides what may be sent. **Persona** decides how it reads and what the reader is advised to
+do. The five (`business_analyst`, `business_manager`, `business_leader`, `domain_specialist`,
+`operational_user`) are free for any user to choose, because choosing one grants nothing — it writes
+a different field, and `redact.py` never looks at it.
+
+| | Business Analyst | Business Manager | Business Leader | Domain Specialist | Operational User |
+|---|---|---|---|---|---|
+| Recommends | analytical follow-ups | operational interventions | decisions and priorities | domain-technical actions | immediate actions |
+| Horizon | next analysis cycle | this quarter | strategic | 2–4 weeks | next shift |
+
+**The invariant, enforced in code.** `personas.reframe` builds every persona's advice from one
+`RecommendationCore` per hypothesis — cause metric, confidence, causal claim, supporting and
+contradicting evidence — computed before any persona is consulted. Evidence, ranking, confidence and
+causal verdicts are therefore identical for every reader; only framing and advice differ. A
+recommendation whose `based_on` is not in that core is dropped rather than shown, so a reframing
+cannot become an invention. Persona differentiation also works with no API key, via
+`_deterministic_reframe` — it degrades in eloquence, not in existence.
 
 ---
 

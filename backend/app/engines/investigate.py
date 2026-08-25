@@ -63,17 +63,32 @@ def _rag_terms(ctx: Context) -> List[str]:
 
 def attach_documentary_evidence(hypothesis: Dict[str, Any], retriever: Retriever,
                                 terms: List[str]) -> Dict[str, Any]:
+    """
+    Search the user's documents both for and against this hypothesis.
+
+    Searching only for support is how an investigation talks itself into a
+    conclusion, so the disconfirmation pass is not optional: every hypothesis
+    carries `contradiction_queries` describing what would show it to be wrong,
+    and those are run with the same weight as the supporting ones.
+    """
     hits: List[Dict[str, Any]] = []
     seen = set()
-    for query in hypothesis.get("rag_queries", []):
-        scoped_query = " ".join([query] + terms)
-        for item in retriever.retrieve_evidence(scoped_query, top_k=3, stance="supporting"):
-            if item["chunk_id"] in seen:
-                continue
-            seen.add(item["chunk_id"])
-            hits.append(item)
+
+    def search(queries: List[str], stance: str) -> None:
+        for query in queries or []:
+            scoped_query = " ".join([query] + terms)
+            for item in retriever.retrieve_evidence(scoped_query, top_k=3, stance=stance):
+                if item["chunk_id"] in seen:
+                    continue
+                seen.add(item["chunk_id"])
+                item.setdefault("stance", stance)
+                hits.append(item)
+
+    search(hypothesis.get("rag_queries", []), "supporting")
+    search(hypothesis.get("contradiction_queries", []), "contradicting")
+
     hits.sort(key=lambda h: h.get("strength", h["relevance"]), reverse=True)
-    hypothesis["documentary_evidence"] = hits[:4]
+    hypothesis["documentary_evidence"] = hits[:6]
     if not retriever.available:
         hypothesis.setdefault("missing", []).append(
             "No business documents have been uploaded, so this hypothesis is tested against "
@@ -82,14 +97,101 @@ def attach_documentary_evidence(hypothesis: Dict[str, Any], retriever: Retriever
         )
     elif not hits:
         hypothesis.setdefault("missing", []).append(
-            "Nothing in the uploaded documents refers to this explanation."
+            "Nothing in the uploaded documents refers to this explanation, either to support "
+            "it or to rule it out."
         )
     return hypothesis
 
 
+def _kpi_semantics(schema: DatasetSchema, metric: str) -> Dict[str, Any]:
+    """What the contract knows about the KPI, for the generation prompt."""
+    definition = schema.kpi_definition(metric) if hasattr(schema, "kpi_definition") else None
+    spec = (schema.contract_resolver or {}).get(metric)
+    formula = getattr(definition, "formula", None)
+    return {
+        "key": metric,
+        "label": getattr(definition, "name", "") or getattr(spec, "label", "") or metric,
+        "business_definition": getattr(definition, "business_definition", "") or "",
+        "why_it_matters": getattr(definition, "relevance", "") or "",
+        "semantic_tags": list(getattr(definition, "semantic_tags", None) or []),
+        "unit": getattr(spec, "unit", ""),
+        "higher_is_better": getattr(spec, "higher_is_better", None),
+        "formula": getattr(formula, "expression", "") or "",
+        "numerator": getattr(formula, "numerator_expression", "") or "",
+        "denominator": getattr(formula, "denominator_expression", "") or "",
+        "granularity": getattr(spec, "granularity_label", ""),
+        "source_fields": list(getattr(spec, "source_fields", None) or []),
+    }
+
+
+def _domain_facts(schema: DatasetSchema) -> Dict[str, Any]:
+    """
+    The kind of business this is, in the words its explanations should use.
+
+    Without this the generation prompt has never been told it is looking at a
+    hospital, which is the whole reason explanations used to come back reading
+    like they were written for a retailer.
+    """
+    domain = getattr(schema, "domain", None)
+    vocab = getattr(domain, "vocab", None)
+    if vocab is None:
+        return {"domain": "uncertain",
+                "note": "The industry could not be determined from the available fields; "
+                        "reason from the dataset's own measures rather than assuming one."}
+    return {
+        "domain": getattr(domain, "domain", "uncertain"),
+        "description": vocab.label,
+        "serves": vocab.entity,
+        "core_activity": vocab.activity,
+        "unit_of_work": vocab.unit_of_work,
+        "capacity_means": vocab.capacity_note,
+        "confidence": getattr(domain, "confidence", 0.0),
+        "is_uncertain": getattr(domain, "is_uncertain", True),
+        "dimensions": list(getattr(schema, "dimensions", None) or []),
+    }
+
+
+def _generate_llm_candidates(ctx: Context, schema: DatasetSchema, signals: Any,
+                             graph: Any, llm) -> tuple:
+    """Ask the model for mechanisms, and validate whatever comes back."""
+    from .llm_hypotheses import build_llm_candidates
+
+    allowed = sorted(set(schema.available_kpis or []))
+    try:
+        raw = llm.generate_hypotheses(
+            signals=signals.model_dump() if hasattr(signals, "model_dump") else signals,
+            kpi_semantics=_kpi_semantics(schema, ctx.metric),
+            domain=_domain_facts(schema),
+            driver_graph=graph.model_dump() if hasattr(graph, "model_dump") else {},
+            allowed_metrics=allowed,
+        )
+    except Exception as exc:                        # never let the LLM break the pipeline
+        return [], f"Domain hypothesis generation unavailable ({exc}); the contract-derived " \
+                   f"decomposition was used on its own."
+    candidates = build_llm_candidates(ctx, raw, allowed)
+    note = (raw or {}).get("generation_note") or ""
+    if not candidates:
+        note = ("No proposed mechanism could be tested with the measures this dataset "
+                "contains; the contract-derived decomposition was used on its own.")
+    return candidates, note
+
+
 def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, Any],
-                uid: str, llm=None) -> Dict[str, Any]:
+                uid: str, llm=None, signals: Any = None,
+                graph: Any = None) -> Dict[str, Any]:
+    """
+    Generate competing explanations and test each against the data.
+
+    Two sources of hypotheses, one measuring machinery. The contract's own
+    formula yields a decomposition that always works and needs no model; the
+    model proposes mechanisms specific to this kind of business. Both arrive as
+    predictions, and `hypotheses.evidence` decides from the data whether each
+    prediction held — so neither source can assert its way to a conclusion.
+    """
+    from .driver_graph import build_driver_graph
+    from .llm_hypotheses import category_summary, shortlist as pick_shortlist
     from .observe import Timeframe, slice_period
+    from .signals import material_signals
 
     tf = Timeframe(observation["timeframe"]["year"], observation["timeframe"]["quarter"])
     base_tf = Timeframe(observation["baseline_timeframe"]["year"],
@@ -101,41 +203,61 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         observation=observation, focus=determine_focus(observation),
     )
 
+<<<<<<< HEAD
+=======
+    # Not enough history for the significance test to qualify the movement in the
+    # first place. Proposing mechanisms here would be explaining a number the
+    # engine has already said it cannot stand behind.
+>>>>>>> upstream/master
     if observation.get("history_status") != "sufficient_history":
         return {
             "focus": {}, "focus_label": "", "hypotheses": [], "considered_count": 0,
             "not_carried_forward": [], "documents_indexed": 0, "rag_available": False,
             "llm_used": False, "llm_note": None,
+<<<<<<< HEAD
             "method_note": observation.get("history_note") + " No causal hypotheses or confidence scores were generated.",
         }
 
     candidates = build_candidates(ctx)
+=======
+            "nothing_to_explain": True,
+            "signal_filter": {},
+            "method_note": ((observation.get("history_note") or "")
+                            + " No causal hypotheses or confidence scores were generated.").strip(),
+        }
+
+    if graph is None:
+        graph = build_driver_graph(schema, ctx.metric, observation)
+    if signals is None:
+        signals = material_signals(observation, {}, ctx.focus)
+
+    # Nothing moved beyond normal variation. Explaining noise on request is the
+    # failure this boundary exists to prevent, so the honest answer is no
+    # hypotheses at all.
+    if getattr(signals, "nothing_material", False):
+        return {
+            "focus": ctx.focus, "focus_label": ctx.focus_label(),
+            "hypotheses": [], "considered_count": 0, "not_carried_forward": [],
+            "documents_indexed": 0, "rag_available": False,
+            "llm_used": False, "llm_note": None,
+            "nothing_to_explain": True,
+            "signal_filter": signals.model_dump() if hasattr(signals, "model_dump") else {},
+            "method_note": signals.filter_note,
+        }
+
+    llm_candidates: List[Dict[str, Any]] = []
+    llm_note = None
+    if llm is not None and llm.enabled:
+        llm_candidates, llm_note = _generate_llm_candidates(ctx, schema, signals, graph, llm)
+
+    candidates = build_candidates(ctx, graph, llm_candidates)
+>>>>>>> upstream/master
     retriever = Retriever(uid)
     terms = _rag_terms(ctx)
 
-    shortlist = [h for h in candidates if h.get("testable")][:MAX_HYPOTHESES]
+    shortlist = pick_shortlist(candidates, MAX_HYPOTHESES)
     for h in shortlist:
         attach_documentary_evidence(h, retriever, terms)
-
-    llm_note = None
-    if llm is not None and llm.enabled:
-        try:
-            enriched = llm.frame_hypotheses(observation, shortlist, ctx.focus)
-            by_key = {e.get("key"): e for e in enriched.get("hypotheses", [])}
-            for h in shortlist:
-                patch = by_key.get(h["key"])
-                if patch:
-                    h["statement"] = patch.get("statement") or h["statement"]
-                    h["title"] = patch.get("title") or h["title"]
-                    h["analyst_note"] = patch.get("analyst_note", "")
-                    extra_q = patch.get("additional_evidence_to_seek") or []
-                    if extra_q:
-                        h.setdefault("missing", []).extend(
-                            [q for q in extra_q if q not in h.get("missing", [])][:2]
-                        )
-            llm_note = enriched.get("framing_note")
-        except Exception as exc:                        # never let the LLM break the pipeline
-            llm_note = f"LLM framing unavailable ({exc}); deterministic hypothesis statements used."
 
     rejected = [
         {"key": h["key"], "title": h["title"],
@@ -153,9 +275,15 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         "rag_available": retriever.available,
         "llm_used": bool(llm is not None and llm.enabled),
         "llm_note": llm_note,
+        "nothing_to_explain": False,
+        "driver_graph": graph.model_dump() if hasattr(graph, "model_dump") else {},
+        "signal_filter": signals.model_dump() if hasattr(signals, "model_dump") else {},
+        "category_coverage": category_summary(shortlist),
         "method_note": (
-            "Hypotheses are generated from a library of business explanations, filtered to those the "
-            "uploaded dataset can actually test. Every number attached to a hypothesis is computed by the "
-            "data-analysis layer; every quotation is retrieved verbatim from an uploaded document."
+            "Hypotheses come from two sources: a decomposition of the KPI's own formula in the "
+            "contract, and mechanisms proposed for this kind of business and then filtered to "
+            "those this dataset can test. Both are stated as predictions; every number attached "
+            "to them is computed by the data-analysis layer, which decides whether each "
+            "prediction held. Every quotation is retrieved verbatim from an uploaded document."
         ),
     }

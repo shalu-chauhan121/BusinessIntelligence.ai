@@ -1,0 +1,208 @@
+{
+  "generator": {
+    "script": "scripts/generate_sample_data.py",
+    "seed": 20260820,
+    "generated_utc": "2026-08-24T13:29:11Z",
+    "method": "Each factor is a toggle; the RNG is reseeded per run and every jitter() call sits outside the factor conditionals, so counterfactual runs differ only by the factor switched. True impacts are exact Shapley values over all 2**3 coalitions."
+  },
+  "dataset": "business_metrics_sample.csv",
+  "target": {
+    "kpi": "revenue",
+    "period": "2026-Q2",
+    "baseline": "2026-Q1",
+    "comparison": "previous_period"
+  },
+  "observed": {
+    "current_value": 3671325.38,
+    "baseline_value": 4433063.21,
+    "change_abs": -761737.83,
+    "change_pct": -17.183
+  },
+  "planted_factors": [
+    {
+      "id": "supply_disruption_product_a",
+      "label": "Supply disruption on Product A",
+      "mechanism": "supply",
+      "locus": {
+        "product": "Product A"
+      },
+      "onset_date": "2026-05-04",
+      "end_date": "2026-06-22",
+      "signature": {
+        "moves": [
+          "fulfilled_orders",
+          "stockout_events",
+          "inventory_units",
+          "units_sold"
+        ],
+        "also_moves": [
+          "revenue",
+          "returns",
+          "support_tickets"
+        ],
+        "leaves_untouched": [
+          "customers"
+        ],
+        "note": "A fulfilment story: demand is unchanged, but fill rate drops 45% (40.5% outside North). Starts 4 weeks AFTER the North revenue decline began, which is the temporal contradiction CONTEST must surface."
+      },
+      "true_impact_revenue": {
+        "shapley": -471863.54,
+        "leave_one_out": -426534.97,
+        "share_of_planted_delta_pct": 46.088
+      },
+      "expected_rank": 1
+    },
+    {
+      "id": "north_demand_erosion",
+      "label": "Competitive demand erosion in North",
+      "mechanism": "demand",
+      "locus": {
+        "region": "North"
+      },
+      "onset_date": "2026-04-06",
+      "end_date": null,
+      "signature": {
+        "moves": [
+          "units_sold",
+          "orders",
+          "customers"
+        ],
+        "also_moves": [
+          "revenue"
+        ],
+        "leaves_untouched": [
+          "fulfilled_orders",
+          "stockout_events",
+          "inventory_units"
+        ],
+        "note": "A volume story. Realised price dips only on the Online channel, by 3% at full ramp, from defensive discounting -- so a price/volume split must come out volume-led."
+      },
+      "true_impact_revenue": {
+        "shapley": -444764.57,
+        "leave_one_out": -408219.4,
+        "share_of_planted_delta_pct": 43.441
+      },
+      "expected_rank": 2
+    },
+    {
+      "id": "east_demand_erosion",
+      "label": "Competitive demand erosion in East",
+      "mechanism": "demand",
+      "locus": {
+        "region": "East"
+      },
+      "onset_date": "2026-05-18",
+      "end_date": null,
+      "signature": {
+        "moves": [
+          "units_sold",
+          "orders",
+          "customers"
+        ],
+        "also_moves": [
+          "revenue"
+        ],
+        "leaves_untouched": [
+          "fulfilled_orders",
+          "stockout_events",
+          "inventory_units"
+        ],
+        "note": "The hardest of the three to find: East is the smallest region (weight 0.71) and erodes for only the last ~6 weeks of the quarter, so its absolute contribution is modest while its over-index should be high."
+      },
+      "true_impact_revenue": {
+        "shapley": -107214.32,
+        "leave_one_out": -98430.92,
+        "share_of_planted_delta_pct": 10.472
+      },
+      "expected_rank": 3
+    }
+  ],
+  "totals": {
+    "counterfactual_value_no_factors": 4695167.81,
+    "planted_delta": -1023842.43,
+    "natural_drift": 262104.6,
+    "planted_share_of_observed_delta_pct": 134.409,
+    "note": "observed_delta = planted_delta + natural_drift. Natural drift is trend, seasonality and noise between the two quarters; no engine should be expected to attribute it to a factor."
+  },
+  "dimension_truth": {
+    "region": {
+      "North": {
+        "planted_impact": -568305.52,
+        "planted_share_pct": 55.507,
+        "observed_delta": -491340.14,
+        "observed_share_pct": 64.503,
+        "natural_drift": 76965.38
+      },
+      "South": {
+        "planted_impact": -117740.12,
+        "planted_share_pct": 11.5,
+        "observed_delta": -55025.28,
+        "observed_share_pct": 7.224,
+        "natural_drift": 62714.84
+      },
+      "East": {
+        "planted_impact": -201979.81,
+        "planted_share_pct": 19.728,
+        "observed_delta": -144306.1,
+        "observed_share_pct": 18.944,
+        "natural_drift": 57673.71
+      },
+      "West": {
+        "planted_impact": -135816.98,
+        "planted_share_pct": 13.265,
+        "observed_delta": -71066.31,
+        "observed_share_pct": 9.329,
+        "natural_drift": 64750.67
+      }
+    },
+    "product": {
+      "Product A": {
+        "planted_impact": -704265.84,
+        "planted_share_pct": 68.787,
+        "observed_delta": -596321.48,
+        "observed_share_pct": 78.284,
+        "natural_drift": 107944.36
+      },
+      "Product B": {
+        "planted_impact": -123246.22,
+        "planted_share_pct": 12.038,
+        "observed_delta": -60518.5,
+        "observed_share_pct": 7.945,
+        "natural_drift": 62727.72
+      },
+      "Product C": {
+        "planted_impact": -196330.37,
+        "planted_share_pct": 19.176,
+        "observed_delta": -104897.85,
+        "observed_share_pct": 13.771,
+        "natural_drift": 91432.52
+      }
+    }
+  },
+  "expected_findings": {
+    "anomaly": true,
+    "verdict": "meaningful_signal",
+    "loci_that_must_appear": [
+      {
+        "product": "Product A"
+      },
+      {
+        "region": "North"
+      },
+      {
+        "region": "East"
+      }
+    ],
+    "temporal_ordering": [
+      {
+        "earlier": "north_demand_erosion",
+        "later": "supply_disruption_product_a",
+        "why": "The revenue decline begins with the North erosion in early April; the supply disruption starts in May. A cause cannot explain a change that started before it."
+      }
+    ],
+    "price_volume": {
+      "expect": "volume_led",
+      "why": "Demand erosion moves units; realised price barely moves."
+    }
+  }
+}

@@ -3,16 +3,33 @@ Metric registry and dataset schema handling.
 
 Everything numerical the product shows is produced here or in the other modules
 of `app.engines`. The LLM never computes a business number.
+
+**The KPI Contract is the source of truth for KPI definitions.** The `METRICS`
+dict below is no longer that: it is a seed for the general KPI library in
+`app.kpi.library`, kept here so the fallback path stays honest when a dataset
+has no contract yet.
+
+Every lookup helper takes an optional `resolver` — the compiled contract for the
+dataset being analysed, produced by `app.kpi.resolver.compile_contract`. Because
+`CompiledKpi` exposes the same attribute surface as `MetricSpec`
+(`key, label, unit, kind, scale, higher_is_better, additive`), the engines are
+indifferent to which they were handed, and a caller that passes nothing gets
+exactly the behaviour this module had before the contract existed.
 """
 from __future__ import annotations
 
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
+
+# A resolver maps a KPI key to something MetricSpec-shaped. It is typed loosely
+# on purpose: importing app.kpi here would make the dependency circular, and the
+# only contract between the two is the attribute surface described above.
+Resolver = Mapping[str, Any]
 
 DIMENSION_HINTS = ["region", "product", "channel", "segment", "category", "sub_category",
                    "country", "store", "team", "sales_rep", "industry", "plan", "tier"]
@@ -127,16 +144,50 @@ class DatasetSchema:
     years: List[int] = field(default_factory=list)
     grain: str = "unknown"
     warnings: List[str] = field(default_factory=list)
+    # The compiled KPI Contract for this dataset, attached by `dataset_service.load`.
+    # Not serialisable and deliberately excluded from `to_dict`.
+    contract_resolver: Optional[Resolver] = field(default=None, repr=False, compare=False)
+    contract_status: str = ""
+    contract_version: int = 0
+    # The detected business context, rebuilt from the contract by
+    # `dataset_service.attach_contract`. This is what lets an explanation speak
+    # about beds and admissions rather than about "units". Like the resolver it
+    # is not serialisable and is excluded from `to_dict`.
+    domain: Optional[Any] = field(default=None, repr=False, compare=False)
+
+    # -- contract semantics -------------------------------------------------
+    def kpi_definition(self, key: str) -> Optional[Any]:
+        """
+        The full `KpiDefinition` behind a KPI key, when this dataset has a
+        contract.
+
+        The compiled resolver already carries the definition; the engines only
+        ever received the label and unit, which is why a KPI's business meaning
+        never reached an explanation. Returns None for a dataset with no
+        contract, so every caller must treat the semantics as optional.
+        """
+        spec = (self.contract_resolver or {}).get(key)
+        return getattr(spec, "definition", None) if spec else None
+
+    @property
+    def domain_key(self) -> str:
+        """The detected domain key, or 'uncertain' when nothing was detected."""
+        return getattr(self.domain, "domain", None) or "uncertain"
 
     def to_dict(self) -> Dict[str, Any]:
-        d = self.__dict__.copy()
+        d = {k: v for k, v in self.__dict__.items()
+             if k not in ("contract_resolver", "domain")}
+        d["domain"] = self.domain_key
         d["kpi_catalogue"] = [
             {
                 "key": k,
-                "label": METRICS[k].label if k in METRICS else k.replace("_", " ").title(),
-                "unit": METRICS[k].unit if k in METRICS else "count",
-                "higher_is_better": METRICS[k].higher_is_better if k in METRICS else True,
-                "description": METRICS[k].description if k in METRICS else "Uploaded numeric column.",
+                "label": metric_label(k, self.contract_resolver),
+                "unit": metric_unit(k, self.contract_resolver),
+                "higher_is_better": higher_is_better(k, self.contract_resolver),
+                "description": metric_description(k, self.contract_resolver),
+                "granularity": getattr(
+                    metric_spec(k, self.contract_resolver), "granularity_label", ""),
+                "kpi_status": getattr(metric_spec(k, self.contract_resolver), "status", ""),
             }
             for k in self.available_kpis
         ]
@@ -271,13 +322,28 @@ def _col_sum(df: pd.DataFrame, expr: str) -> float:
     return float(df[expr].sum())
 
 
-def compute(df: pd.DataFrame, metric_key: str) -> float:
+def metric_spec(metric_key: str, resolver: Optional[Resolver] = None) -> Optional[Any]:
+    """
+    The definition for a KPI key.
+
+    The contract wins when it has the key; otherwise the seed registry answers,
+    which is what keeps datasets with no contract working unchanged.
+    """
+    if resolver is not None and metric_key in resolver:
+        return resolver[metric_key]
+    return METRICS.get(metric_key)
+
+
+def compute(df: pd.DataFrame, metric_key: str, resolver: Optional[Resolver] = None) -> float:
     """Aggregate one KPI over an arbitrary slice of rows."""
     if df is None or len(df) == 0:
         return float("nan")
-    spec = METRICS.get(metric_key)
+    spec = metric_spec(metric_key, resolver)
     if spec is None:                                  # uploaded numeric column
         return float(df[metric_key].sum()) if metric_key in df.columns else float("nan")
+    # A contract entry carries its own compiled formula.
+    if hasattr(spec, "compute"):
+        return spec.compute(df)
 
     if spec.kind == "sum":
         return _col_sum(df, spec.numerator_expr or spec.key)
@@ -290,27 +356,37 @@ def compute(df: pd.DataFrame, metric_key: str) -> float:
     return num / den * spec.scale
 
 
-def metric_components(df: pd.DataFrame, metric_key: str):
+def metric_components(df: pd.DataFrame, metric_key: str,
+                      resolver: Optional[Resolver] = None):
     """(numerator, denominator) for ratio KPIs — needed for mix/rate decomposition."""
-    spec = METRICS.get(metric_key)
-    if spec is None or spec.kind != "ratio":
+    spec = metric_spec(metric_key, resolver)
+    if spec is None:
+        return None, None
+    if hasattr(spec, "components"):
+        return spec.components(df)
+    if spec.kind != "ratio":
         return None, None
     return _col_sum(df, spec.numerator_expr or spec.numerator), _col_sum(df, spec.denominator)
 
 
-def metric_label(metric_key: str) -> str:
-    spec = METRICS.get(metric_key)
+def metric_label(metric_key: str, resolver: Optional[Resolver] = None) -> str:
+    spec = metric_spec(metric_key, resolver)
     return spec.label if spec else metric_key.replace("_", " ").title()
 
 
-def metric_unit(metric_key: str) -> str:
-    spec = METRICS.get(metric_key)
+def metric_unit(metric_key: str, resolver: Optional[Resolver] = None) -> str:
+    spec = metric_spec(metric_key, resolver)
     return spec.unit if spec else "count"
 
 
-def higher_is_better(metric_key: str) -> bool:
-    spec = METRICS.get(metric_key)
+def higher_is_better(metric_key: str, resolver: Optional[Resolver] = None) -> bool:
+    spec = metric_spec(metric_key, resolver)
     return spec.higher_is_better if spec else True
+
+
+def metric_description(metric_key: str, resolver: Optional[Resolver] = None) -> str:
+    spec = metric_spec(metric_key, resolver)
+    return getattr(spec, "description", "") if spec else "Uploaded numeric column."
 
 
 def pct_change(current: float, previous: float) -> float:

@@ -21,9 +21,63 @@ ANALYST_ONLY_SIGNIFICANCE = [
 ]
 ANALYST_ONLY_SCORING = ["score_ledger", "support_score", "against_score", "missing_penalty"]
 
+# How a driver was RANKED is analyst detail: the score components, the member's
+# robust z against its own history, the Shapley axis weighting. A leader still
+# sees which drivers came out on top, their rank, and their contribution -- the
+# finding -- without the arithmetic that produced the ordering.
+ANALYST_ONLY_DRIVER = [
+    "score_components", "member_score", "axis_weight", "score_weight_used",
+    "member_robust_z", "member_significance_note", "weeks_outside_band",
+    "weeks_in_period", "persistence_note", "method",
+]
+
+# A leader reads the KPI Contract to understand what a number means; the machinery
+# that produced the proposal — the row-level checks, the derivation rule, the
+# confidence internals — is analyst detail.
+ANALYST_ONLY_KPI = ["provenance", "confidence", "comparability", "validation_rules"]
+ANALYST_ONLY_CONTRACT = ["field_profiles", "rejected_candidates", "screened_by"]
+
 
 def is_analyst(user: Dict[str, Any]) -> bool:
     return user.get("role") == "data_analyst"
+
+
+def redact_contract(contract: Dict[str, Any], analyst: bool) -> Dict[str, Any]:
+    """
+    Shape a KPI Contract for the reader's role.
+
+    What a KPI *means* — its definition, formula, unit, grain, business rules and
+    approval state — is never hidden: that is the whole point of the contract.
+    Only the derivation machinery is analyst-only.
+
+    Fields are emptied rather than removed, so the response still satisfies the
+    published `KpiContract` schema. A consumer sees the same shape whoever asks;
+    the detail is what changes.
+    """
+    if analyst:
+        return contract
+    out = copy.deepcopy(contract)
+    out["field_profiles"] = []
+    out["rejected_candidates"] = []
+    for kpi in out.get("kpis", []) or []:
+        provenance = kpi.get("provenance") or {}
+        # Where a definition came from is part of trusting it, so the origin and
+        # the fact of review survive even though the evidence behind them does not.
+        kpi["provenance"] = {
+            "origin": provenance.get("origin", "general_library"),
+            "derived_from": [],
+            "derivation_rule": None,
+            "computability_evidence": {},
+            "screened_by": provenance.get("screened_by"),
+            "screening_verdict": None,
+            "created_at": provenance.get("created_at", ""),
+            "edited_by": [],
+            "notes": [],
+        }
+        kpi["comparability"] = []
+        kpi["validation_rules"] = []
+    out["analyst_view_available"] = True
+    return out
 
 
 def redact_observation(observation: Dict[str, Any], analyst: bool) -> Dict[str, Any]:
@@ -35,6 +89,14 @@ def redact_observation(observation: Dict[str, Any], analyst: bool) -> Dict[str, 
         sig.pop(key, None)
     sig["explanation"] = _plain_significance(observation)
     out["drivers"] = {}                     # leaders get `top_drivers` only
+
+    # The ranking survives; the machinery behind it does not.
+    for driver in out.get("top_drivers") or []:
+        for key in ANALYST_ONLY_DRIVER:
+            driver.pop(key, None)
+    out.pop("dimension_shapley", None)
+    out.pop("dimension_ranking", None)
+
     out["analyst_view_available"] = True
     return out
 

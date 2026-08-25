@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard'
 import DataPage from './pages/DataPage'
 import DocumentsPage from './pages/DocumentsPage'
 import HistoryPage from './pages/HistoryPage'
+import KpiStudioPage from './pages/KpiStudioPage'
 import InvestigationPage from './pages/InvestigationPage'
 import SettingsPage from './pages/SettingsPage'
 
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="/investigation" element={<InvestigationPage />} />
         <Route path="/investigation/:investigationId" element={<InvestigationPage />} />
         <Route path="/history" element={<HistoryPage />} />
+        <Route path="/kpi" element={<KpiStudioPage />} />
         <Route path="/data" element={<DataPage />} />
         <Route path="/documents" element={<DocumentsPage />} />
         <Route path="/settings" element={<SettingsPage />} />

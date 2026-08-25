@@ -146,11 +146,20 @@ export function AuthProvider({ children }) {
     return updated
   }, [])
 
+  // Presentation only — changes how findings are framed and what is
+  // recommended, never what the server is willing to send. That stays on role.
+  const changePersona = useCallback(async (persona) => {
+    const updated = await api.setPersona(persona)
+    setProfile(updated)
+    return updated
+  }, [])
+
   const value = useMemo(
     () => ({
       status,
       profile,
       role: profile?.role || null,
+      persona: profile?.persona || null,
       can: (permission) => Boolean(profile?.permissions?.[permission]),
       isAnalyst: profile?.role === 'data_analyst',
       authMode,
@@ -161,9 +170,11 @@ export function AuthProvider({ children }) {
       signInWithGoogle,
       logout,
       changeRole,
+      changePersona,
       describeAuthError,
     }),
-    [status, profile, authMode, notice, signUp, signIn, signInWithGoogle, logout, changeRole],
+    [status, profile, authMode, notice, signUp, signIn, signInWithGoogle, logout, changeRole,
+     changePersona],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

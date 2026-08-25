@@ -43,6 +43,11 @@ def reset_store() -> None:              # used by the test-suite
 # ---------------------------------------------------------------------------
 class UserRepository:
     ROLES = ("data_analyst", "business_leader")
+    # Presentation only. A role says what a user may see; a persona says how it
+    # is framed and what they are advised to do. The two are deliberately
+    # independent — see `app.personas`.
+    PERSONAS = ("business_analyst", "business_manager", "business_leader",
+                "domain_specialist", "operational_user")
 
     def __init__(self):
         self.col = get_store().collection("users")
@@ -87,6 +92,18 @@ class UserRepository:
         if role not in self.ROLES:
             raise ValueError(f"unknown role: {role}")
         return self.col.update_one({"uid": uid}, {"role": role, "updated_at": now_iso()})
+
+    def set_persona(self, uid: str, persona: str) -> Optional[Dict[str, Any]]:
+        """
+        Change how investigations are framed for this user.
+
+        Deliberately does not touch `role`: a persona carries no authority, so
+        changing it can never widen what the server is willing to send.
+        """
+        if persona not in self.PERSONAS:
+            raise ValueError(f"unknown persona: {persona}")
+        return self.col.update_one({"uid": uid},
+                                   {"persona": persona, "updated_at": now_iso()})
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +175,75 @@ class DocumentRepository:
     def delete(self, uid: str, document_id: str) -> bool:
         self.chunks.delete_many({"uid": uid, "document_id": document_id})
         return self.col.delete_one({"uid": uid, "_id": document_id})
+
+
+# ---------------------------------------------------------------------------
+# kpi contracts (the authoritative KPI definitions per dataset)
+# ---------------------------------------------------------------------------
+class KpiContractRepository:
+    """
+    Versioned KPI contracts, one current version per (uid, dataset).
+
+    Versioning follows the pattern `DatasetRepository.set_active` already uses:
+    a new document per version with `is_current` flipped, rather than mutation
+    in place. An approval is therefore auditable and reversible — the version
+    that produced a saved investigation is still on disk.
+    """
+
+    def __init__(self):
+        self.col = get_store().collection("kpi_contracts")
+
+    def save(self, uid: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert or overwrite a contract document by its own id."""
+        payload = {**doc, "uid": uid, "updated_at": now_iso()}
+        existing = self.col.find_one({"uid": uid, "_id": payload["_id"]})
+        if existing:
+            return self.col.update_one({"_id": payload["_id"]}, payload) or payload
+        payload.setdefault("created_at", now_iso())
+        return self.col.insert_one(payload)
+
+    def get(self, uid: str, contract_id: str) -> Optional[Dict[str, Any]]:
+        return self.col.find_one({"uid": uid, "_id": contract_id})
+
+    def current(self, uid: str, dataset_id: str) -> Optional[Dict[str, Any]]:
+        """The live contract the analysis engines resolve against."""
+        found = self.col.find({"uid": uid, "dataset_id": dataset_id, "is_current": True},
+                              sort=("version", -1), limit=1)
+        return found[0] if found else None
+
+    def draft(self, uid: str, dataset_id: str) -> Optional[Dict[str, Any]]:
+        """
+        The version under review, if any.
+
+        A draft is deliberately NOT current: approving one KPI inside a draft
+        must not change what the dashboard shows. The draft goes live only when
+        the contract as a whole is approved.
+        """
+        found = self.col.find({"uid": uid, "dataset_id": dataset_id, "status": "draft"},
+                              sort=("version", -1), limit=1)
+        return found[0] if found else None
+
+    def versions(self, uid: str, dataset_id: str) -> List[Dict[str, Any]]:
+        return self.col.find({"uid": uid, "dataset_id": dataset_id}, sort=("version", -1))
+
+    def next_version(self, uid: str, dataset_id: str) -> int:
+        existing = self.versions(uid, dataset_id)
+        return 1 + max((int(d.get("version", 0)) for d in existing), default=0)
+
+    def make_current(self, uid: str, dataset_id: str, contract_id: str) -> None:
+        """Exactly one version of a dataset's contract is ever current."""
+        for doc in self.col.find({"uid": uid, "dataset_id": dataset_id}):
+            is_current = doc["_id"] == contract_id
+            if bool(doc.get("is_current")) != is_current:
+                self.col.update_one({"_id": doc["_id"]}, {"is_current": is_current})
+            if not is_current and doc.get("status") == "approved":
+                self.col.update_one({"_id": doc["_id"]}, {"status": "superseded"})
+
+    def delete_for_dataset(self, uid: str, dataset_id: str) -> int:
+        docs = self.col.find({"uid": uid, "dataset_id": dataset_id})
+        for doc in docs:
+            self.col.delete_one({"_id": doc["_id"]})
+        return len(docs)
 
 
 # ---------------------------------------------------------------------------

@@ -71,8 +71,9 @@ def download_template():
 
 
 @router.get("/datasets/active")
-def get_active(dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
-    df, schema = dataset_service.load(dataset)
+def get_active(user: Dict[str, Any] = Depends(current_user),
+               dataset: Dict[str, Any] = Depends(active_dataset)) -> Dict[str, Any]:
+    df, schema = dataset_service.load(dataset, user["uid"])
     return {
         **_shape_dataset(dataset),
         "timeframes": available_timeframes(df),

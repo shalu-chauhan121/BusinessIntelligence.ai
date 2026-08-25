@@ -1,5 +1,15 @@
 import { useEffect, useState } from 'react'
-import { BriefcaseBusiness, Cpu, Database, LineChart, ShieldCheck } from 'lucide-react'
+import {
+  BriefcaseBusiness,
+  Cpu,
+  Database,
+  LineChart,
+  Rocket,
+  ShieldCheck,
+  Stethoscope,
+  Users,
+  Wrench,
+} from 'lucide-react'
 import { Badge, Callout, LoadingCard, SectionTitle } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
 import { api } from '../lib/api'
@@ -20,13 +30,26 @@ const ROLES = [
   },
 ]
 
+// Icons keyed by persona — purely presentational, so this lives on the
+// frontend rather than in the API response.
+const PERSONA_ICONS = {
+  business_analyst: LineChart,
+  business_manager: Users,
+  business_leader: BriefcaseBusiness,
+  domain_specialist: Stethoscope,
+  operational_user: Wrench,
+}
+
 export default function SettingsPage() {
-  const { profile, changeRole } = useAuth()
+  const { profile, changeRole, changePersona } = useAuth()
   const [status, setStatus] = useState(null)
+  const [personas, setPersonas] = useState([])
   const [busy, setBusy] = useState(false)
+  const [personaBusy, setPersonaBusy] = useState(false)
 
   useEffect(() => {
     api.systemStatus().then(setStatus).catch(() => setStatus(null))
+    api.authConfig().then((c) => setPersonas(c.personas || [])).catch(() => setPersonas([]))
   }, [])
 
   return (
@@ -72,6 +95,46 @@ export default function SettingsPage() {
                   {selected ? <Badge tone="good">Current</Badge> : null}
                 </div>
                 <p className="mt-1 text-sm text-ink-secondary">{blurb}</p>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      <section>
+        <SectionTitle
+          title="How investigations are written for you"
+          description="Persona is separate from role and changes nothing about what the server sends — it decides how a finding is explained and what it recommends you do. Every persona sees the same evidence, the same ranking and the same confidence; only the framing and the advice differ."
+        />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {personas.map(({ key, label, description, action_horizon: horizon }) => {
+            const Icon = PERSONA_ICONS[key] || Rocket
+            const selected = profile?.persona === key
+            return (
+              <button
+                key={key}
+                type="button"
+                disabled={personaBusy}
+                onClick={async () => {
+                  setPersonaBusy(true)
+                  try {
+                    await changePersona(key)
+                  } finally {
+                    setPersonaBusy(false)
+                  }
+                }}
+                className="card card-pad text-left transition-shadow hover:shadow-sm"
+                style={selected ? { outline: '2px solid var(--series-1)', outlineOffset: '-1px' } : undefined}
+              >
+                <div className="flex items-center gap-2">
+                  <Icon className="h-4 w-4" style={{ color: selected ? 'var(--series-1)' : 'var(--text-muted)' }} aria-hidden />
+                  <span className="text-sm font-semibold text-ink">{label}</span>
+                  {selected ? <Badge tone="good">Current</Badge> : null}
+                </div>
+                <p className="mt-1 text-sm text-ink-secondary">{description}</p>
+                {horizon ? (
+                  <p className="mt-1.5 text-xs text-ink-muted">Recommends for: {horizon.replace('_', ' ')}</p>
+                ) : null}
               </button>
             )
           })}

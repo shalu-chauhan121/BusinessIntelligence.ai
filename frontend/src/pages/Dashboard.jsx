@@ -26,10 +26,23 @@ export default function Dashboard() {
       data.telemetry = telemetry
       setState({ data, error: null, loading: false })
       const tf = data.observe?.timeframe
+      const patch = {}
       if (tf && (settings.year !== tf.year || settings.quarter !== tf.quarter)) {
-        update({ year: tf.year, quarter: tf.quarter })
+        Object.assign(patch, { year: tf.year, quarter: tf.quarter })
       }
+      if (data.observe?.kpi && settings.kpi !== data.observe.kpi) {
+        patch.kpi = data.observe.kpi
+      }
+      if (Object.keys(patch).length) update(patch)
     } catch (error) {
+      // A KPI remembered from a previously active dataset (e.g. via localStorage)
+      // may not be approved for the dataset that's active now. Rather than get
+      // stuck on an error screen with no KPI picker, drop back to the dataset's
+      // own default KPI once and retry.
+      if (settings.kpi && error.status === 422 && /approved KPI/.test(error.message || '')) {
+        update({ kpi: null })
+        return
+      }
       setState({ data: null, error, loading: false })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,6 +90,17 @@ export default function Dashboard() {
         }
       />
 
+      {obs.contract_status === 'provisional' ? (
+        <Callout tone="warning" title="These KPI definitions have not been reviewed">
+          They were generated automatically from the general KPI library so the product works out
+          of the box. Open the{' '}
+          <Link className="underline" to="/kpi">
+            KPI contract
+          </Link>{' '}
+          to confirm each definition, set its granularity and make it authoritative.
+        </Callout>
+      ) : null}
+
       <TimeframePicker
         timeframes={timeframes}
         year={settings.year ?? obs.timeframe.year}
@@ -96,6 +120,7 @@ export default function Dashboard() {
           <div className="min-w-0">
             <div className="text-xs font-medium uppercase tracking-wider text-ink-muted">
               {obs.kpi_label} · {obs.timeframe.pretty} vs {obs.baseline_timeframe.pretty}
+              {obs.granularity ? ` · ${obs.granularity}` : ''}
             </div>
             <div className="mt-1 flex flex-wrap items-baseline gap-3">
               <span className="tnum text-3xl font-semibold text-ink sm:text-4xl">
