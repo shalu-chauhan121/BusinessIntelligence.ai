@@ -10,9 +10,9 @@ from app.engines.act import act
 from app.engines.observe import Timeframe, observe, slice_period
 from app.rag.chunker import chunk_document
 from app.rag.retriever import Retriever
-from app.services import pipeline
+from app.services import dataset_service, pipeline
 
-from .base import EngineTestCase
+from .base import EngineTestCase, SAMPLE_CSV
 
 
 class TestRetrieval(EngineTestCase):
@@ -184,6 +184,24 @@ class TestFullPipeline(EngineTestCase):
     def test_quiet_quarter_produces_a_no_action_story(self):
         result = pipeline.run_full(self.uid, self.dataset, "revenue", 2026, 1, persist=False, use_llm=False)
         self.assertFalse(result["observe"]["anomaly"])
+
+    def test_weak_evidence_requests_clarification_without_recommendation(self):
+        """A real run preserves uncertainty instead of inventing a cause or action."""
+        uid = "weak_evidence_user"
+        dataset = dataset_service.store_upload(uid, SAMPLE_CSV.name, SAMPLE_CSV.read_bytes())
+        result = pipeline.run_full(uid, dataset, "revenue", 2026, 1, persist=False, use_llm=False)
+        top = result["contest"]["ranking"][0]
+        request = result["act"]["clarification_request"]
+        self.assertEqual(result["engine"]["pipeline"], ["observe", "investigate", "contest", "act"])
+        self.assertLess(top["confidence"], 45)
+        self.assertEqual(top["band"], "weak")
+        self.assertTrue(result["act"]["narrative"]["what_we_are_not_sure_about"])
+        self.assertNotIn("strongest-evidenced explanation", result["act"]["narrative"]["leading_explanation"])
+        self.assertEqual(result["act"]["recommendations"], [])
+        self.assertEqual(request["status"], "clarification_required")
+        self.assertTrue(request["missing_evidence"])
+        self.assertTrue(request["questions"])
+        self.assertIn("not probabilities", result["contest"]["confidence_disclaimer"])
 
     def test_a_second_user_sees_none_of_the_first_users_data(self):
         from app.db.repositories import DatasetRepository

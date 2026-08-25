@@ -101,6 +101,14 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         observation=observation, focus=determine_focus(observation),
     )
 
+    if observation.get("history_status") != "sufficient_history":
+        return {
+            "focus": {}, "focus_label": "", "hypotheses": [], "considered_count": 0,
+            "not_carried_forward": [], "documents_indexed": 0, "rag_available": False,
+            "llm_used": False, "llm_note": None,
+            "method_note": observation.get("history_note") + " No causal hypotheses or confidence scores were generated.",
+        }
+
     candidates = build_candidates(ctx)
     retriever = Retriever(uid)
     terms = _rag_terms(ctx)

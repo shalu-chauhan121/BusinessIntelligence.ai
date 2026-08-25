@@ -179,3 +179,15 @@ class InvestigationRepository:
 
     def delete(self, uid: str, investigation_id: str) -> bool:
         return self.col.delete_one({"uid": uid, "_id": investigation_id})
+
+
+class TelemetryRepository:
+    """Request-level metrics only: never prompts, dataset rows, or model output."""
+    def __init__(self):
+        self.col = get_store().collection("telemetry")
+
+    def create(self, uid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.col.insert_one({"_id": new_id("tel"), "uid": uid, "created_at": now_iso(), **payload})
+
+    def list_for_user(self, uid: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        return self.col.find({"uid": uid}, sort=("created_at", -1), limit=limit)

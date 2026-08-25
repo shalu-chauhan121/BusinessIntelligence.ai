@@ -41,6 +41,16 @@ export const CONFIDENCE_BANDS = {
 }
 
 export const VERDICT_COPY = {
+  newly_launched: {
+    label: 'Newly launched',
+    tone: 'warning',
+    blurb: 'Current KPI value is available, but there is no prior history for trend analysis.',
+  },
+  sparse_history: {
+    label: 'Sparse history',
+    tone: 'warning',
+    blurb: 'Current KPI value is available, but historical trend analysis is limited.',
+  },
   meaningful_signal: {
     label: 'Meaningful signal',
     tone: 'critical',

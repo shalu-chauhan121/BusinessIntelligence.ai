@@ -19,7 +19,11 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setState((s) => ({ ...s, loading: true, error: null }))
     try {
-      const data = await api.dashboard(settings)
+      const [data, telemetry] = await Promise.all([
+        api.dashboard(settings),
+        api.telemetrySummary().catch(() => null),
+      ])
+      data.telemetry = telemetry
       setState({ data, error: null, loading: false })
       const tf = data.observe?.timeframe
       if (tf && (settings.year !== tf.year || settings.quarter !== tf.quarter)) {
@@ -55,7 +59,7 @@ export default function Dashboard() {
     )
   }
 
-  const { observe: obs, timeframes, schema, dataset } = state.data
+  const { observe: obs, timeframes, schema, dataset, telemetry } = state.data
   const verdict = VERDICT_COPY[obs.verdict] || VERDICT_COPY.within_normal_variation
   const primary = obs.kpi_scoreboard?.find((k) => k.is_primary)
 
@@ -83,6 +87,8 @@ export default function Dashboard() {
         onChange={update}
         busy={state.loading}
       />
+
+      <RuntimeTelemetry telemetry={telemetry} />
 
       {/* headline */}
       <div className="card card-pad">
@@ -236,5 +242,37 @@ export default function Dashboard() {
         </Callout>
       ) : null}
     </div>
+  )
+}
+
+function RuntimeTelemetry({ telemetry }) {
+  const t = telemetry || {}
+  const formatTokens = (value) => value >= 1000 ? `${(value / 1000).toFixed(value >= 100000 ? 0 : 1)}K` : (value || 0).toLocaleString()
+  const formatCost = (value) => `$${Number(value || 0).toFixed(3)}`
+  const stats = [
+    ['Avg latency', `${t.average_latency_ms || 0} ms`],
+    ['P95 latency', `${t.p95_latency_ms || 0} ms`],
+    ['Model calls', `${t.average_model_calls || 0} / request`],
+    ['Total tokens', formatTokens(t.total_tokens)],
+    ['Avg tokens', formatTokens(t.average_total_tokens)],
+    ['Estimated cost', formatCost(t.estimated_total_cost)],
+    ['Cost / insight', formatCost(t.average_cost_per_request)],
+  ]
+  return (
+    <section className="card card-pad">
+      <SectionTitle
+        eyebrow="Efficiency"
+        title="Runtime Telemetry"
+        description={`${t.total_requests || 0} insight requests tracked. Token and cost values are estimates when provider usage or pricing is unavailable.`}
+      />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+        {stats.map(([label, value]) => (
+          <div key={label} className="rounded-lg px-3 py-2" style={{ background: 'var(--plane)' }}>
+            <div className="text-xs text-ink-muted">{label}</div>
+            <div className="tnum mt-1 text-sm font-semibold text-ink">{value}</div>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
