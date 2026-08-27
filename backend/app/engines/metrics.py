@@ -154,6 +154,10 @@ class DatasetSchema:
     # about beds and admissions rather than about "units". Like the resolver it
     # is not serialisable and is excluded from `to_dict`.
     domain: Optional[Any] = field(default=None, repr=False, compare=False)
+    # Per-source provenance and freshness when this dataset was reconciled from
+    # several sources (see `app.services.reconciliation`), else None. Like the
+    # resolver and domain it is not a plain value, so `to_dict` serialises it.
+    sources: Optional[Any] = field(default=None, repr=False, compare=False)
 
     # -- contract semantics -------------------------------------------------
     def kpi_definition(self, key: str) -> Optional[Any]:
@@ -176,8 +180,9 @@ class DatasetSchema:
 
     def to_dict(self) -> Dict[str, Any]:
         d = {k: v for k, v in self.__dict__.items()
-             if k not in ("contract_resolver", "domain")}
+             if k not in ("contract_resolver", "domain", "sources")}
         d["domain"] = self.domain_key
+        d["sources"] = self.sources.to_dict() if self.sources is not None else None
         d["kpi_catalogue"] = [
             {
                 "key": k,
@@ -237,7 +242,12 @@ def detect_schema(df: pd.DataFrame) -> DatasetSchema:
             continue
         series = df[c]
         coerced = pd.to_numeric(series, errors="coerce")
-        if coerced.notna().mean() > 0.8:
+        # Judge numeric-ness over the values that are actually PRESENT. A
+        # reconciled frame legitimately carries blanks where no source covered a
+        # cell, and those must not tip a measure into being read as a dimension.
+        populated = int(series.notna().sum())
+        numeric_share = (coerced.notna().sum() / populated) if populated else 0.0
+        if numeric_share > 0.8:
             numeric_cols.append(c)
         else:
             if series.nunique(dropna=True) <= max(60, int(len(df) * 0.2)):
@@ -293,14 +303,25 @@ def detect_schema(df: pd.DataFrame) -> DatasetSchema:
     )
 
 
-def prepare(df: pd.DataFrame, schema: DatasetSchema) -> pd.DataFrame:
-    """Normalise, type and enrich the frame with period keys."""
+def prepare(df: pd.DataFrame, schema: DatasetSchema,
+            preserve_missing: bool = False) -> pd.DataFrame:
+    """
+    Normalise, type and enrich the frame with period keys.
+
+    `preserve_missing` keeps genuinely absent measures as NaN instead of
+    zero-filling them. Off by default, so an ordinary upload behaves exactly as
+    before (a blank cell in a hand-maintained CSV is a data-entry gap, and 0 is
+    as good a default as any). A reconciled multi-source frame turns it on,
+    because there a blank means "no source covered this" — zero-filling it would
+    fabricate the very value reconciliation refused to invent.
+    """
     df = normalise_columns(df)
     df["_date"] = pd.to_datetime(df[schema.date_column], errors="coerce")
     df = df.dropna(subset=["_date"])
     for c in schema.base_metrics + schema.extra_metrics:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            numeric = pd.to_numeric(df[c], errors="coerce")
+            df[c] = numeric if preserve_missing else numeric.fillna(0.0)
     for c in schema.dimensions:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("Unknown")

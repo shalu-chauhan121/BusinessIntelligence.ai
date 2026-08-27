@@ -138,7 +138,7 @@ def _domain_facts(schema: DatasetSchema) -> Dict[str, Any]:
         return {"domain": "uncertain",
                 "note": "The industry could not be determined from the available fields; "
                         "reason from the dataset's own measures rather than assuming one."}
-    return {
+    facts = {
         "domain": getattr(domain, "domain", "uncertain"),
         "description": vocab.label,
         "serves": vocab.entity,
@@ -149,6 +149,19 @@ def _domain_facts(schema: DatasetSchema) -> Dict[str, Any]:
         "is_uncertain": getattr(domain, "is_uncertain", True),
         "dimensions": list(getattr(schema, "dimensions", None) or []),
     }
+    report = getattr(schema, "sources", None)
+    if report is not None:
+        # Read-only grounding. The model may reason about what a stale or
+        # withheld source means for an explanation; it has no authority over
+        # any number, any freshness verdict or any withholding decision.
+        facts["source_freshness"] = [
+            {"source": s.label or s.source_id, "status": s.freshness,
+             "last_refresh_at": s.last_refresh_at, "basis": s.last_refresh_basis,
+             "note": s.note}
+            for s in report.sources
+        ]
+        facts["withheld_kpis"] = dict(report.withheld_kpis)
+    return facts
 
 
 def _generate_llm_candidates(ctx: Context, schema: DatasetSchema, signals: Any,
@@ -203,23 +216,14 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         observation=observation, focus=determine_focus(observation),
     )
 
-<<<<<<< HEAD
-=======
     # Not enough history for the significance test to qualify the movement in the
     # first place. Proposing mechanisms here would be explaining a number the
     # engine has already said it cannot stand behind.
->>>>>>> upstream/master
     if observation.get("history_status") != "sufficient_history":
         return {
             "focus": {}, "focus_label": "", "hypotheses": [], "considered_count": 0,
             "not_carried_forward": [], "documents_indexed": 0, "rag_available": False,
             "llm_used": False, "llm_note": None,
-<<<<<<< HEAD
-            "method_note": observation.get("history_note") + " No causal hypotheses or confidence scores were generated.",
-        }
-
-    candidates = build_candidates(ctx)
-=======
             "nothing_to_explain": True,
             "signal_filter": {},
             "method_note": ((observation.get("history_note") or "")
@@ -251,7 +255,6 @@ def investigate(df: pd.DataFrame, schema: DatasetSchema, observation: Dict[str, 
         llm_candidates, llm_note = _generate_llm_candidates(ctx, schema, signals, graph, llm)
 
     candidates = build_candidates(ctx, graph, llm_candidates)
->>>>>>> upstream/master
     retriever = Retriever(uid)
     terms = _rag_terms(ctx)
 

@@ -18,13 +18,9 @@ from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
-<<<<<<< HEAD
-from .prompts import ACT_SYSTEM, CONTEST_SYSTEM, INVESTIGATE_SYSTEM
-=======
 from .prompts import (ACT_SYSTEM, CONTEST_SYSTEM, HYPOTHESIS_SYSTEM,
                       INVESTIGATE_SYSTEM, KPI_DISCOVERY_SYSTEM, QUERY_SYSTEM,
                       persona_system)
->>>>>>> upstream/master
 from ..services.telemetry import track_llm_cache, track_llm_call
 
 log = logging.getLogger(__name__)

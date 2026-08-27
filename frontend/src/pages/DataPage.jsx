@@ -6,6 +6,7 @@ import {
   CircleSlash,
   Download,
   FileSpreadsheet,
+  Layers,
   Sparkles,
   Trash2,
   Upload,
@@ -21,6 +22,8 @@ export default function DataPage() {
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null)
+  const [pendingFiles, setPendingFiles] = useState(null)
+  const [sourceMeta, setSourceMeta] = useState({})
   const fileInput = useRef(null)
 
   const load = useCallback(async () => {
@@ -69,7 +72,44 @@ export default function DataPage() {
 
   const upload = (files) => {
     if (!files?.length) return
-    withBusy(() => api.uploadDataset(files[0]), `${files[0].name} uploaded and made active.`)
+    if (files.length === 1) {
+      withBusy(() => api.uploadDataset(files[0]), `${files[0].name} uploaded and made active.`)
+      return
+    }
+    // Several files: stage them so a refresh cadence can be given per source
+    // before reconciling. Purely optional metadata — leaving it blank behaves
+    // exactly as before (cadence unknown, freshness taken from the data itself).
+    const list = Array.from(files)
+    setPendingFiles(list)
+    setSourceMeta(Object.fromEntries(list.map((f) => [f.name, { cadence: '', last_refresh_at: '' }])))
+  }
+
+  const updateSourceMeta = (filename, patch) => {
+    setSourceMeta((prev) => ({ ...prev, [filename]: { ...prev[filename], ...patch } }))
+  }
+
+  const confirmMultisourceUpload = () => {
+    if (!pendingFiles?.length) return
+    const meta = Object.fromEntries(
+      Object.entries(sourceMeta)
+        .map(([name, m]) => [name, {
+          ...(m.cadence ? { cadence: m.cadence } : {}),
+          ...(m.last_refresh_at ? { last_refresh_at: new Date(m.last_refresh_at).toISOString() } : {}),
+        }])
+        .filter(([, m]) => Object.keys(m).length),
+    )
+    withBusy(
+      () => api.uploadDatasets(pendingFiles, meta),
+      `${pendingFiles.length} sources reconciled into one business view — see where the data came from on the dashboard.`,
+    ).then(() => {
+      setPendingFiles(null)
+      setSourceMeta({})
+    })
+  }
+
+  const cancelMultisourceUpload = () => {
+    setPendingFiles(null)
+    setSourceMeta({})
   }
 
   if (!datasets && !error) return <LoadingCard label="Loading your datasets…" />
@@ -83,6 +123,50 @@ export default function DataPage() {
       />
 
       {error ? <ErrorState title="Upload failed" message={error.message} onRetry={load} /> : null}
+      {pendingFiles?.length ? (
+        <div className="card card-pad space-y-3">
+          <SectionTitle
+            eyebrow="Before reconciling"
+            title="Refresh cadence per source"
+            description="Optional. Left blank, a source's freshness is judged from its own data rather than asserted — leaving these blank is a legitimate choice, not a shortcut."
+          />
+          <div className="space-y-2">
+            {pendingFiles.map((f) => (
+              <div key={f.name} className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm" style={{ borderColor: 'var(--border)' }}>
+                <Layers className="h-4 w-4 shrink-0 text-ink-muted" aria-hidden />
+                <span className="min-w-0 flex-1 truncate font-medium text-ink">{f.name}</span>
+                <select
+                  className="field"
+                  value={sourceMeta[f.name]?.cadence || ''}
+                  onChange={(e) => updateSourceMeta(f.name, { cadence: e.target.value })}
+                >
+                  <option value="">Cadence unknown</option>
+                  <option value="hourly">Hourly</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+                <input
+                  type="datetime-local"
+                  className="field"
+                  value={sourceMeta[f.name]?.last_refresh_at || ''}
+                  onChange={(e) => updateSourceMeta(f.name, { last_refresh_at: e.target.value })}
+                  title="Last refreshed (optional) — when this source itself says its data was last updated"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <button type="button" className="btn-primary" disabled={busy} onClick={confirmMultisourceUpload}>
+              Reconcile {pendingFiles.length} sources
+            </button>
+            <button type="button" className="btn-ghost" disabled={busy} onClick={cancelMultisourceUpload}>
+              Cancel
+            </button>
+          </div>
+          {busy ? <Spinner label="Reconciling…" /> : null}
+        </div>
+      ) : null}
       {message ? (
         <Callout tone="good" title="Done">
           {message}
@@ -101,20 +185,23 @@ export default function DataPage() {
             }}
           >
             <Upload className="mb-2 h-6 w-6 text-ink-muted" aria-hidden />
-            <p className="text-sm font-medium text-ink">Drop a CSV here, or choose a file</p>
+            <p className="text-sm font-medium text-ink">Drop your CSVs here, or choose files</p>
             <p className="mt-1 max-w-md text-xs text-ink-secondary">
-              One row per period × dimensions. The format reference below lists every column the analysis understands.
+              One row per period × dimensions. Drop several files at once — if your business data is
+              split across systems, they are reconciled into one view. They just need to use the same
+              field names; there is nothing to map.
             </p>
             <input
               ref={fileInput}
               type="file"
               accept=".csv,text/csv"
+              multiple
               className="sr-only"
               onChange={(e) => upload(e.target.files)}
             />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               <button type="button" className="btn-primary" onClick={() => fileInput.current?.click()} disabled={busy}>
-                Choose CSV
+                Choose CSVs
               </button>
               <a className="btn-ghost" href={api.templateUrl()}>
                 <Download className="h-4 w-4" aria-hidden />

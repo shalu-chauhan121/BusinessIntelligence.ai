@@ -317,11 +317,7 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
             uncertainty.append(h["contest"]["temporal"]["detail"])
     uncertainty.extend(contested.get("unresolved_questions", [])[:3])
 
-<<<<<<< HEAD
-    recommendations = build_recommendations(df, observation, contested, focus_label)
-=======
     recommendations = build_recommendations(df, observation, contested, focus_label, resolver)
->>>>>>> upstream/master
     if contested.get("clarification_request") and top and top["scoring"]["confidence"] < 45:
         recommendations = []
     if limited_history:
@@ -385,5 +381,26 @@ def act(df: pd.DataFrame, observation: Dict[str, Any], investigation: Dict[str, 
             "cannot be found by it.",
             "Confidence scores measure evidence strength, not probability, and do not establish causation.",
             "Recommendations are decision support for a human owner, not automated decisions.",
+            *_source_limits(observation),
         ],
     }
+
+
+def _source_limits(observation: Dict[str, Any]) -> List[str]:
+    """Stale/missing-source and withheld-KPI caveats for a reconciled view.
+    Deterministic — this only restates what reconciliation already decided."""
+    report = observation.get("sources")
+    if not report:
+        return []
+    out: List[str] = []
+    for src in report.get("sources", []):
+        who = src.get("label") or src.get("source_id")
+        if src.get("freshness") == "stale":
+            out.append(f"{who} was last refreshed at {src.get('last_refresh_at')} and is stale; "
+                       "treat figures drawn from it as provisional.")
+        elif src.get("freshness") == "missing":
+            out.append(f"{who} contributed no data to this view.")
+    for kpi_id, reason in sorted((report.get("withheld_kpis") or {}).items()):
+        out.append(reason)
+    return out
+

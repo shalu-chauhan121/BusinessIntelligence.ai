@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     min_history_comparisons: int = 4
     max_drivers_per_dimension: int = 5
 
+    # Multi-source reconciliation. When two sources report the same business
+    # cell, a difference within this tolerance is rounding/timing noise and the
+    # value is taken as corroborated; anything larger is a real disagreement the
+    # system refuses to rule on by itself.
+    source_agreement_tolerance_pct: float = 0.5
+
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

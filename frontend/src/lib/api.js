@@ -92,6 +92,17 @@ export const api = {
     form.append('file', file)
     return request('/api/datasets', { method: 'POST', form })
   },
+  // Several CSVs are reconciled into one canonical view. They are assumed to
+  // already share field names — there is no mapping step to configure.
+  // `sourceMeta`, when given, is refresh metadata only: { [filename]: { cadence, last_refresh_at } }.
+  uploadDatasets: (files, sourceMeta) => {
+    const form = new FormData()
+    Array.from(files).forEach((f) => form.append('files', f))
+    if (sourceMeta && Object.keys(sourceMeta).length) {
+      form.append('source_meta', JSON.stringify(sourceMeta))
+    }
+    return request('/api/datasets', { method: 'POST', form })
+  },
   loadSampleDataset: () => request('/api/datasets/load-sample', { method: 'POST' }),
   activateDataset: (id) => request(`/api/datasets/${id}/activate`, { method: 'POST' }),
   deleteDataset: (id) => request(`/api/datasets/${id}`, { method: 'DELETE' }),

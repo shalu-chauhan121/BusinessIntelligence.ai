@@ -4,6 +4,7 @@ import { ArrowRight, Database, Info, TriangleAlert } from 'lucide-react'
 import DriverChart from '../components/charts/DriverChart'
 import TrendChart from '../components/charts/TrendChart'
 import KpiCard from '../components/KpiCard'
+import SourcePanel from '../components/SourcePanel'
 import TimeframePicker from '../components/TimeframePicker'
 import { AnalystOnly, Badge, Callout, EmptyState, ErrorState, LoadingCard, SectionTitle } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
@@ -113,6 +114,8 @@ export default function Dashboard() {
       />
 
       <RuntimeTelemetry telemetry={telemetry} />
+
+      <SourcePanel sources={obs.sources} />
 
       {/* headline */}
       <div className="card card-pad">
