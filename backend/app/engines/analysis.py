@@ -11,16 +11,25 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from .metrics import compute, pct_change, safe
+from .metrics import Resolver, compute, pct_change, safe
 
 
 # ---------------------------------------------------------------------------
 # temporal onset detection
 # ---------------------------------------------------------------------------
-def weekly_frame(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+def weekly_frame(df: pd.DataFrame, metric: str, resolver: Optional[Resolver] = None) -> pd.DataFrame:
+    """
+    A weekly series for one KPI.
+
+    `resolver` must be the caller's compiled KPI Contract when the dataset has
+    one. Without it, a contract-only KPI (a ratio the seed registry has never
+    heard of) is invisible to `compute` and every week comes back NaN — silently,
+    since `compute` treats an unknown key as an optional raw column and simply
+    finds nothing to sum.
+    """
     rows = []
     for week, grp in df.groupby("_week"):
-        rows.append({"week": str(week), "value": compute(grp, metric)})
+        rows.append({"week": str(week), "value": compute(grp, metric, resolver)})
     out = pd.DataFrame(rows).sort_values("week").reset_index(drop=True)
     return out
 
@@ -103,15 +112,23 @@ def compare_onsets(kpi_onset: Optional[Dict[str, Any]],
 # cross-sectional association
 # ---------------------------------------------------------------------------
 def member_change_table(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
-                        metrics: List[str]) -> pd.DataFrame:
+                        metrics: List[str], resolver: Optional[Resolver] = None) -> pd.DataFrame:
+    """
+    Per-member current/baseline/change for a set of KPIs, the input to
+    cross-sectional consistency checks and correlation.
+
+    `resolver` carries the same requirement as `weekly_frame`: omit it for a
+    contract-only KPI and every member's value is NaN, which then makes
+    `correlate` report n=0 rather than a real association.
+    """
     members = sorted(set(cur[dimension].dropna().unique()) | set(base[dimension].dropna().unique()))
     rows = []
     for m in members:
         c, b = cur[cur[dimension] == m], base[base[dimension] == m]
         row: Dict[str, Any] = {"member": str(m)}
         for metric in metrics:
-            cv = compute(c, metric) if len(c) else float("nan")
-            bv = compute(b, metric) if len(b) else float("nan")
+            cv = compute(c, metric, resolver) if len(c) else float("nan")
+            bv = compute(b, metric, resolver) if len(b) else float("nan")
             row[f"{metric}__cur"] = cv
             row[f"{metric}__base"] = bv
             row[f"{metric}__chg"] = pct_change(cv, bv)

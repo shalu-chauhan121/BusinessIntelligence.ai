@@ -102,8 +102,8 @@ def temporal_check(df: pd.DataFrame, kpi: str, hypothesis: Dict[str, Any],
             "lag_weeks": None, "cause_metric": None,
         }
     scoped = _scoped(window, focus)
-    kpi_weeks = weekly_frame(scoped, kpi)
-    cause_weeks = weekly_frame(scoped, cause_metric)
+    kpi_weeks = weekly_frame(scoped, kpi, resolver)
+    cause_weeks = weekly_frame(scoped, cause_metric, resolver)
     baseline_weeks = max(6, min(10, len(kpi_weeks) // 3))
     kpi_dir = "down" if (hypothesis.get("kpi_direction") or "down") == "down" else "up"
     kpi_onset = detect_onset(kpi_weeks, baseline_weeks=baseline_weeks, direction=kpi_dir)
@@ -119,14 +119,61 @@ def temporal_check(df: pd.DataFrame, kpi: str, hypothesis: Dict[str, Any],
     return result
 
 
+# `analysis.correlate` refuses to report an association below three comparable
+# members (`analysis.py:146`), and r across two points is always exactly +/-1,
+# so a dimension with fewer members cannot support this test at all.
+MIN_CROSS_SECTION_MEMBERS = 3
+# Past this, a column is an identifier rather than a way to slice the business.
+MAX_CROSS_SECTION_MEMBERS = 200
+
+
+def _cross_sectional_dimension(cur: pd.DataFrame, base: pd.DataFrame,
+                               schema: DatasetSchema) -> Optional[str]:
+    """
+    The dimension to run the cross-sectional test across.
+
+    This was a hardcoded `("region", "product", "channel", "segment")`
+    whitelist -- retail vocabulary. Nothing matched on the hospital dataset
+    (`hospital`, `department`) or the school dataset (`school`, `campus`,
+    `grade`), so `consistency_check` returned `not_applicable` for every
+    hypothesis and check 2 of the four adversarial checks was silently
+    disabled on exactly the datasets whose KPIs the seed registry cannot
+    describe either.
+
+    Chosen from the dataset's own dimensions instead: the one with the most
+    members present in *both* periods, since the power of a cross-sectional
+    correlation grows with the number of comparable members. Members absent
+    from one side cannot be compared and so are not counted. Ties break on
+    name, so the choice is deterministic for a given frame.
+
+    On the retail dataset this still selects `region` (4 members, against
+    product's 3), which is what the whitelist selected -- the fix widens the
+    check to other domains without moving retail.
+    """
+    best: Optional[tuple] = None
+    for dim in sorted(getattr(schema, "dimensions", None) or []):
+        if dim not in cur.columns or dim not in base.columns:
+            continue
+        shared = set(cur[dim].dropna().unique()) & set(base[dim].dropna().unique())
+        count = len(shared)
+        if count < MIN_CROSS_SECTION_MEMBERS or count > MAX_CROSS_SECTION_MEMBERS:
+            continue
+        if best is None or count > best[0]:
+            best = (count, dim)
+    return best[1] if best else None
+
+
 def consistency_check(cur: pd.DataFrame, base: pd.DataFrame, schema: DatasetSchema,
                       kpi: str, hypothesis: Dict[str, Any]) -> Dict[str, Any]:
     cause_metric = hypothesis.get("cause_metric")
-    dim = next((d for d in ("region", "product", "channel", "segment") if d in schema.dimensions), None)
+    dim = _cross_sectional_dimension(cur, base, schema)
     if not dim or not cause_metric:
         return {"status": "not_applicable",
-                "detail": "No dimension or no single driver series available for a cross-sectional test."}
-    table = member_change_table(cur, base, dim, [kpi, cause_metric])
+                "detail": ("This hypothesis has no single measurable driver series to test across "
+                           "members." if not cause_metric else
+                           f"No dimension of this dataset has at least {MIN_CROSS_SECTION_MEMBERS} "
+                           "members present in both periods, so there is nothing to compare across.")}
+    table = member_change_table(cur, base, dim, [kpi, cause_metric], schema.contract_resolver)
     corr = correlate(table, kpi, cause_metric)
     counter = counterexamples(
         table, kpi, cause_metric,

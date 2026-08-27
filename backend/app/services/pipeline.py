@@ -142,6 +142,26 @@ def prepare_stage_context(df, schema, observation: Dict[str, Any],
     return {"comparisons": comparisons, "focus": focus, "graph": graph, "signals": signals}
 
 
+def prepare_stage_context(df, schema, observation: Dict[str, Any],
+                          intent: Optional[Any] = None,
+                          comparison: str = "previous_period") -> Dict[str, Any]:
+    """
+    The comparisons, focus, driver graph and material-signal filter one
+    observation needs before INVESTIGATE can run.
+
+    Shared between `run_full` and the single-stage endpoints so that calling
+    `/api/investigate` for one KPI and calling the full pipeline for the same
+    KPI can never disagree about what counts as a material signal or a driver —
+    there is exactly one place this is computed.
+    """
+    comparisons = _observe_comparisons(df, schema, intent, observation, comparison)
+    focus = determine_focus(observation)
+    graph = build_driver_graph(schema, observation["kpi"], observation,
+                               getattr(intent, "dimension_hints", None))
+    signals = material_signals(observation, comparisons, focus)
+    return {"comparisons": comparisons, "focus": focus, "graph": graph, "signals": signals}
+
+
 def run_full(uid: str, dataset: Dict[str, Any], metric: Optional[str], year: Optional[int],
              quarter: Optional[int], comparison: str = "previous_period",
              persist: bool = True, use_llm: bool = True,

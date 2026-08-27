@@ -127,7 +127,7 @@ def monitoring_threshold(df: pd.DataFrame, metric: str,
                          resolver: Optional[Resolver] = None) -> Optional[Dict[str, Any]]:
     """A control threshold derived from the KPI's own weekly history."""
     try:
-        weeks = weekly_frame(df, metric)
+        weeks = weekly_frame(df, metric, resolver)
     except Exception:
         return None
     values = weeks["value"].astype(float).dropna().values
