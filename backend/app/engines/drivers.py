@@ -346,14 +346,14 @@ def member_persistence(df, dimension: str, member: str, metric: str, tf,
         return {"onset_week": None, "weeks_outside_band": 0, "weeks_in_period": 0}
 
     window = scoped[(scoped["_date"] >= lo) & (scoped["_date"] <= hi)]
-    weeks = weekly_frame(window, metric)
+    weeks = weekly_frame(window, metric, resolver)
     baseline_weeks = max(4, int((period_start - lo).days / 7) - 1) if period_start == period_start else 8
 
     direction = "down" if (member_direction(df, dimension, member, metric, tf, resolver) < 0) else "up"
     onset = detect_onset(weeks, baseline_weeks=baseline_weeks, direction=direction)
 
     # Count breaches inside the period itself, not across the run-up window.
-    period_weeks = weekly_frame(slice_period(scoped, tf), metric)
+    period_weeks = weekly_frame(slice_period(scoped, tf), metric, resolver)
     weeks_in_period = int(len(period_weeks))
     outside = 0
     if onset:
