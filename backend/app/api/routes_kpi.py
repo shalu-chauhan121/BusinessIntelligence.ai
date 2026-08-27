@@ -352,12 +352,20 @@ def resolve_conflict(conflict_id: str, body: ConflictResolveRequest,
     contract = _editable(user, dataset_id)
     _guard(kpi_service.resolve_conflict, contract, conflict_id,
            body.option_id, body.rationale, user["uid"])
+    # Persist the resolution before rebuilding: `rebuild_reconciled_view` reads
+    # the contract back from storage to find which conflicts are resolved, so
+    # saving first is what lets it see this one rather than the stale draft.
+    kpi_service.save(contract)
+    # A source disagreement is settled by naming an authoritative source, so the
+    # reconciled view is rebuilt with that ruling applied — no re-upload.
+    dataset_service.rebuild_reconciled_view(user["uid"], contract.dataset_id)
     return _respond(contract, user)
 
 
 # ---------------------------------------------------------------------------
 # library
 # ---------------------------------------------------------------------------
+
 @router.get("/library", response_model=List[LibraryEntryResponse])
 def library(dataset_id: Optional[str] = None,
             user: Dict[str, Any] = Depends(current_user)) -> List[LibraryEntryResponse]:

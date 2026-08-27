@@ -1,9 +1,9 @@
 """Dataset and document management — every upload is scoped to the signed-in user."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
 from ..db.repositories import DatasetRepository, DocumentRepository
@@ -28,6 +28,7 @@ def _shape_dataset(ds: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": ds.get("created_at"),
         "is_active": bool(ds.get("is_active")),
         "schema": ds.get("schema", {}),
+        "sources": ds.get("sources"),
     }
 
 
@@ -41,17 +42,58 @@ def list_datasets(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any
 
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
-async def upload_dataset(file: UploadFile = File(...),
+async def upload_dataset(file: Optional[UploadFile] = File(None),
+                         files: Optional[List[UploadFile]] = File(None),
+                         as_of: Optional[str] = Form(None),
+                         source_meta: Optional[str] = Form(None),
                          user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    raw = await file.read()
-    if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            f"File larger than {MAX_UPLOAD_MB} MB.")
+    """
+    Upload one dataset, or several sources that are reconciled into one.
+
+    Both form field names are accepted: `file` is the long-standing
+    single-upload field and keeps working exactly as it always did; `files`
+    carries one or many. Several files are assumed to share field names and
+    meanings (the KPI Contract already defines those) and are reconciled into
+    one canonical view — there is no mapping step and nothing to configure.
+
+    `source_meta` is refresh metadata only — never semantics — supplied as a
+    JSON object keyed by filename:
+    `{"finance.csv": {"cadence": "hourly", "last_refresh_at": "2026-06-30T08:00:00Z"}}`.
+    Both keys are optional per file; an unmentioned file falls back to its data's
+    own latest timestamp and an unassertable cadence, exactly as before.
+    """
+    incoming = list(files or [])
+    if file is not None:
+        incoming.insert(0, file)
+
+    payloads = []
+    for f in incoming:
+        raw = await f.read()
+        if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                f"{f.filename} is larger than {MAX_UPLOAD_MB} MB.")
+        payloads.append((f.filename or "dataset.csv", raw))
+    if not payloads:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No file was uploaded.")
+
+    meta: Dict[str, Any] = {}
+    if source_meta:
+        import json as _json
+        try:
+            meta = _json.loads(source_meta)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                f"source_meta is not valid JSON: {exc}") from exc
+
     try:
-        ds = dataset_service.store_upload(user["uid"], file.filename or "dataset.csv", raw)
+        if len(payloads) == 1:
+            ds = dataset_service.store_upload(user["uid"], payloads[0][0], payloads[0][1])
+        else:
+            ds = dataset_service.store_multisource_upload(user["uid"], payloads, as_of=as_of,
+                                                           source_meta=meta)
     except dataset_service.DatasetError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    return _shape_dataset(ds)
+    return {**_shape_dataset(ds), "sources": ds.get("sources")}
 
 
 @router.post("/datasets/load-sample", status_code=status.HTTP_201_CREATED)

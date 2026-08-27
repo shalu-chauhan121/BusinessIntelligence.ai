@@ -138,7 +138,7 @@ def _domain_facts(schema: DatasetSchema) -> Dict[str, Any]:
         return {"domain": "uncertain",
                 "note": "The industry could not be determined from the available fields; "
                         "reason from the dataset's own measures rather than assuming one."}
-    return {
+    facts = {
         "domain": getattr(domain, "domain", "uncertain"),
         "description": vocab.label,
         "serves": vocab.entity,
@@ -149,6 +149,19 @@ def _domain_facts(schema: DatasetSchema) -> Dict[str, Any]:
         "is_uncertain": getattr(domain, "is_uncertain", True),
         "dimensions": list(getattr(schema, "dimensions", None) or []),
     }
+    report = getattr(schema, "sources", None)
+    if report is not None:
+        # Read-only grounding. The model may reason about what a stale or
+        # withheld source means for an explanation; it has no authority over
+        # any number, any freshness verdict or any withholding decision.
+        facts["source_freshness"] = [
+            {"source": s.label or s.source_id, "status": s.freshness,
+             "last_refresh_at": s.last_refresh_at, "basis": s.last_refresh_basis,
+             "note": s.note}
+            for s in report.sources
+        ]
+        facts["withheld_kpis"] = dict(report.withheld_kpis)
+    return facts
 
 
 def _generate_llm_candidates(ctx: Context, schema: DatasetSchema, signals: Any,
