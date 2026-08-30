@@ -269,7 +269,7 @@ def _dimension_drivers(observation: Optional[Dict[str, Any]],
     if not observation:
         return [], list(hints or [])
 
-    from .investigate import MIN_CONTRIBUTION_PCT, MIN_OVER_INDEX
+    from .observe import MIN_FOCUS_CONTRIBUTION_PCT, MIN_FOCUS_OVER_INDEX
 
     rows: List[Dict[str, Any]] = []
     relevant: List[str] = []
@@ -279,9 +279,9 @@ def _dimension_drivers(observation: Optional[Dict[str, Any]],
             if r.get("is_aggregate"):
                 continue
             contribution, over_index = r.get("contribution_pct"), r.get("over_index")
-            if contribution is None or contribution < MIN_CONTRIBUTION_PCT:
+            if contribution is None or contribution < MIN_FOCUS_CONTRIBUTION_PCT:
                 continue
-            if over_index is not None and over_index < MIN_OVER_INDEX:
+            if over_index is not None and over_index < MIN_FOCUS_OVER_INDEX:
                 continue
             rows.append({"dimension": dim, "member": r.get("name"),
                          "contribution_pct": contribution, "over_index": over_index,

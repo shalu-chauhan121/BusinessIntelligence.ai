@@ -1,13 +1,21 @@
 """
-The four investigation stages, the dashboard, saved investigations, and the
-agent loop.
+The dashboard, question interpretation, the agent loop, saved answers, and
+telemetry.
 
-Most routes here return `Dict[str, Any]` with no `response_model`: a stage
-payload is a deep, engine-shaped dict that moved with every batch, so pinning
-it in OpenAPI would have cost more than it bought. `/questions/ask` is the one
-exception and declares a real response model, for the reason `routes_kpi.py`
-gives about the KPI contract — its shape is already frozen (`AgentAnswer`) and
-is the artefact a client depends on.
+Most routes here return `Dict[str, Any]` with no `response_model`: a payload
+is a deep, engine-shaped dict, so pinning it in OpenAPI would have cost more
+than it bought. `/questions/ask` is the one exception and declares a real
+response model, for the reason `routes_kpi.py` gives about the KPI contract —
+its shape is already frozen (`AgentAnswer`) and is the artefact a client
+depends on.
+
+The four-stage pipeline (`observe -> investigate -> contest -> act`) and its
+endpoints, `/investigations/run` and `/questions/investigate`, were retired at
+A9: the agent loop behind `/questions/ask` is now the only way this API
+answers a business question. `/questions/interpret` survives — it is a cheap,
+independently-tested read of the KPI Contract grounding layer with no
+narrative template in it, and nothing downstream depends on the pipeline it
+used to feed.
 """
 from __future__ import annotations
 
@@ -18,26 +26,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..agent import loop
 from ..agent.context import AgentContext
-from ..db.repositories import DatasetRepository, InvestigationRepository, TelemetryRepository
+from ..db.repositories import DatasetRepository, InvestigationRepository, TelemetryRepository, new_id
 from ..deps import active_dataset, current_user
-from ..engines.contest import contest as contest_stage
-from ..engines.investigate import investigate as investigate_stage
-from ..engines.act import act as act_stage
 from ..engines.observe import available_timeframes
 from ..llm.client import LLMTransportError, get_llm
-from ..models.schemas import (AgentAnswerResponse, AgentQuestionRequest, AnalysisRequest,
-                              QuestionRequest)
-from ..personas import persona_for_role
+from ..models.schemas import AgentAnswerResponse, AgentQuestionRequest, QuestionRequest
 from ..query import interpret_question_cached
-from ..services import dataset_service, pipeline
+from ..services import dashboard as dashboard_service
+from ..services import dataset_service
 from ..services.telemetry import request_telemetry, track_processing_step
-from .redact import (
-    is_analyst,
-    redact_contest,
-    redact_investigation,
-    redact_observation,
-    redact_result,
-)
+from .redact import is_analyst, redact_observation
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +96,8 @@ def dashboard(year: Optional[int] = Query(default=None),
     with request_telemetry(user["uid"], "/api/dashboard") as telemetry:
         with track_processing_step("Load dataset", "Non-LLM Processing"):
             df, schema = dataset_service.load(dataset, user["uid"])
-        observation = _guard(pipeline.run_observe, dataset, kpi, year, quarter, comparison,
-                             user["uid"])
+        observation = _guard(dashboard_service.run_observe, dataset, kpi, year, quarter,
+                             comparison, user["uid"])
     return {
         "dataset": {"id": dataset["_id"], "filename": dataset.get("filename"),
                     "rows": schema.row_count, "grain": schema.grain},
@@ -119,173 +117,7 @@ def timeframes(user: Dict[str, Any] = Depends(current_user),
 
 
 # ---------------------------------------------------------------------------
-# single-stage endpoints — intent-driven
-# ---------------------------------------------------------------------------
-def _resolve_stage_target(user: Dict[str, Any], ds: Dict[str, Any], body: AnalysisRequest):
-    """
-    What KPI/period a stage should run against, and how it was decided.
-
-    A caller may name the KPI directly (`kpi`/`year`/`quarter`, the original
-    contract these endpoints shipped with) or ask a question and let it resolve
-    against the KPI contract, the same way `/api/questions/investigate` does.
-    The question wins when both are given, since it is the more specific ask.
-
-    Returns `(kpi, year, quarter, comparison, intent, clarification)`.
-    `clarification` is the payload to return as-is when a question could not
-    be resolved — the caller checks this before doing anything else. Unlike
-    the KPI-driven path, an unresolvable question must not fall through to
-    "not an approved KPI"; that error names a KPI, and there isn't one yet.
-    """
-    if not body.question:
-        return body.kpi, body.year, body.quarter, body.comparison, None, None
-
-    df, schema = dataset_service.load(ds, user["uid"])
-    llm = get_llm() if body.use_llm else None
-    intent = interpret_question_cached(body.question, schema, df, ds["_id"], llm=llm)
-    if intent.blocked or not intent.outcome:
-        clarification = {
-            "status": "needs_clarification",
-            "question": body.question,
-            "intent": intent.model_dump(),
-            "ambiguities": [a.model_dump() for a in intent.ambiguities if a.blocking],
-        }
-        return None, None, None, None, intent, clarification
-
-    period = intent.period
-    return (intent.outcome.kpi_key,
-            period.year if period else body.year,
-            period.quarter if period else body.quarter,
-            period.comparison if period else body.comparison,
-            intent, None)
-
-
-@router.post("/observe")
-def observe_endpoint(body: AnalysisRequest,
-                     user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """STAGE 1 alone — for a named KPI, or for a question resolved against the contract."""
-    ds = _dataset_for(user, body.dataset_id)
-    with request_telemetry(user["uid"], "/api/observe") as telemetry:
-        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-        if clarification:
-            return clarification
-        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-    result = {"stage": "observe", "observe": redact_observation(observation, is_analyst(user)),
-              "telemetry": telemetry.saved}
-    if intent:
-        result["intent"] = intent.model_dump()
-    return result
-
-
-@router.post("/investigate")
-def investigate_endpoint(body: AnalysisRequest,
-                         user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """STAGES 1-2 — the material-signal filter and driver graph run exactly as in the full pipeline."""
-    ds = _dataset_for(user, body.dataset_id)
-    with request_telemetry(user["uid"], "/api/investigate") as telemetry:
-        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-        if clarification:
-            return clarification
-        with track_processing_step("Load dataset", "Non-LLM Processing"):
-            df, schema = dataset_service.load(ds, user["uid"])
-        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-        llm = get_llm() if body.use_llm else None
-        with track_processing_step("Investigate", "Non-LLM Processing"):
-            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                              signals=ctx["signals"], graph=ctx["graph"])
-    analyst = is_analyst(user)
-    result = {"stage": "investigate",
-              "observe": redact_observation(observation, analyst),
-              "investigate": redact_investigation(investigation, analyst),
-              "telemetry": telemetry.saved}
-    if intent:
-        result["intent"] = intent.model_dump()
-    return result
-
-
-@router.post("/contest")
-def contest_endpoint(body: AnalysisRequest,
-                     user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """STAGES 1-3."""
-    ds = _dataset_for(user, body.dataset_id)
-    with request_telemetry(user["uid"], "/api/contest") as telemetry:
-        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-        if clarification:
-            return clarification
-        with track_processing_step("Load dataset", "Non-LLM Processing"):
-            df, schema = dataset_service.load(ds, user["uid"])
-        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-        llm = get_llm() if body.use_llm else None
-        with track_processing_step("Investigate", "Non-LLM Processing"):
-            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                              signals=ctx["signals"], graph=ctx["graph"])
-        with track_processing_step("Contest", "Non-LLM Processing"):
-            contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
-    analyst = is_analyst(user)
-    result = {"stage": "contest",
-              "observe": redact_observation(observation, analyst),
-              "investigate": redact_investigation(investigation, analyst),
-              "contest": redact_contest(contested, analyst),
-              "telemetry": telemetry.saved}
-    if intent:
-        result["intent"] = intent.model_dump()
-    return result
-
-
-@router.post("/act")
-def act_endpoint(body: AnalysisRequest,
-                 user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """STAGE 4 (runs 1-3 internally), reframed for the caller's persona."""
-    ds = _dataset_for(user, body.dataset_id)
-    with request_telemetry(user["uid"], "/api/act") as telemetry:
-        kpi, year, quarter, comparison, intent, clarification = _resolve_stage_target(user, ds, body)
-        if clarification:
-            return clarification
-        with track_processing_step("Load dataset", "Non-LLM Processing"):
-            df, schema = dataset_service.load(ds, user["uid"])
-        observation = _guard(pipeline.run_observe, ds, kpi, year, quarter, comparison, user["uid"])
-        ctx = pipeline.prepare_stage_context(df, schema, observation, intent, comparison)
-        llm = get_llm() if body.use_llm else None
-        with track_processing_step("Investigate", "Non-LLM Processing"):
-            investigation = investigate_stage(df, schema, observation, user["uid"], llm=llm,
-                                              signals=ctx["signals"], graph=ctx["graph"])
-        with track_processing_step("Contest", "Non-LLM Processing"):
-            contested = contest_stage(df, schema, observation, investigation, user["uid"], llm=llm)
-        persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
-        with track_processing_step("Act", "Non-LLM Processing"):
-            action = act_stage(df, observation, investigation, contested, llm=llm,
-                               resolver=schema.contract_resolver, persona=persona)
-    result = {"stage": "act", "act": action, "telemetry": telemetry.saved}
-    if intent:
-        result["intent"] = intent.model_dump()
-    return result
-
-
-# ---------------------------------------------------------------------------
-# full pipeline
-# ---------------------------------------------------------------------------
-@router.post("/investigations/run")
-def run_investigation(body: AnalysisRequest,
-                      user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """
-    OBSERVE -> INVESTIGATE -> CONTEST -> ACT for an explicitly chosen KPI.
-
-    Superseded as the primary entry point by `/questions/investigate`, which
-    resolves the KPI from a question instead. Kept because the dashboard still
-    drills in from a named KPI, and because saved investigations link here.
-    """
-    ds = _dataset_for(user, body.dataset_id)
-    persona = user.get("persona") or persona_for_role(user.get("role"))
-    with request_telemetry(user["uid"], "/api/investigations/run") as telemetry:
-        result = _guard(pipeline.run_full, user["uid"], ds, body.kpi, body.year, body.quarter,
-                        body.comparison, body.persist, body.use_llm, persona)
-    result["telemetry"] = telemetry.saved
-    return redact_result(result, user)
-
-
-# ---------------------------------------------------------------------------
-# question-driven investigation
+# question interpretation
 # ---------------------------------------------------------------------------
 @router.post("/questions/interpret")
 def interpret(body: QuestionRequest,
@@ -304,28 +136,6 @@ def interpret(body: QuestionRequest,
             "assumptions": intent.assumptions}
 
 
-@router.post("/questions/investigate")
-def investigate_question(body: QuestionRequest,
-                         user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    """
-    Ask a business question and get the full investigation.
-
-    Returns `status: "needs_clarification"` instead of a result when the
-    question cannot be resolved to a KPI this dataset measures, or names a
-    period it does not hold. Answering the nearest question instead would be a
-    confident answer to something the user did not ask.
-    """
-    ds = _dataset_for(user, body.dataset_id)
-    persona = body.persona or user.get("persona") or persona_for_role(user.get("role"))
-    with request_telemetry(user["uid"], "/api/questions/investigate") as telemetry:
-        result = _guard(pipeline.run_question, user["uid"], ds, body.question,
-                        persona=persona, persist=body.persist, use_llm=body.use_llm)
-        if result.get("status") == "needs_clarification":
-            return result
-    result["telemetry"] = telemetry.saved
-    return redact_result(result, user)
-
-
 # ---------------------------------------------------------------------------
 # agentic question answering
 # ---------------------------------------------------------------------------
@@ -336,14 +146,17 @@ def ask_question(body: AgentQuestionRequest,
     Ask a business question and get a prose answer plus the complete trail of
     tool calls that produced it.
 
-    Every ending of the agent loop is HTTP 200 with a typed `status`, the same
-    way `/questions/investigate` returns `needs_clarification` at 200: a
+    Every ending of the agent loop is HTTP 200 with a typed `status`: a
     question the loop could not converge on, a safety refusal, and the absence
     of an API key are all things a client renders, not errors it retries. Only
     a missing dataset (409), a broken one (422) and a provider outage (503) are
     errors.
 
-    Nothing is persisted, so this does not appear under `GET /api/investigations`.
+    Persisted only when `body.persist` is set — `InvestigationRepository` is a
+    generic store, so the `AgentAnswer` is saved as-is, with no kpi/verdict
+    shape imposed on it. `GET /api/investigations` lists it; `GET
+    /api/investigations/{id}` returns it unredacted, for the same reason given
+    below.
 
     The evidence trail is complete for every role — `redact.py` is deliberately
     not applied here. Showing how the answer was reached is the point of the
@@ -356,9 +169,10 @@ def ask_question(body: AgentQuestionRequest,
             # tool schemas — the only substantial non-LLM work in the request.
             ctx = _guard(AgentContext.build, user["uid"], ds)
         # `llm` is passed rather than left to `loop.answer`'s own lazy lookup,
-        # matching the four stage endpoints and giving tests the same seam.
+        # giving tests the same seam this endpoint uses.
         result = _llm_guard(loop.answer, body.question, ctx, llm=get_llm())
-    return {
+
+    payload = {
         # Field by field rather than `dataclasses.asdict`: that deep-copies
         # recursively, and `evidence[*]["result"]` is an arbitrarily large
         # nested tool payload. Serialising is this endpoint's whole job, so it
@@ -378,7 +192,30 @@ def ask_question(body: AgentQuestionRequest,
         "view": {"role": user.get("role"), "analyst_detail_included": is_analyst(user),
                  "redaction": "none"},
         "telemetry": telemetry.saved,
+        "investigation_id": None,
     }
+
+    if body.persist and result.status == "ok":
+        # Reserved before the write, not read back after it: `payload["result"]`
+        # is `payload` itself, so patching `investigation_id` in after
+        # `create()` would mutate the very dict just handed to the store,
+        # racing whatever `create()` already did with it (serialise it to
+        # disk, hold a reference, or both) rather than reliably landing in
+        # what gets persisted.
+        payload["investigation_id"] = new_id("inv")
+        InvestigationRepository().create(user["uid"], {
+            "_id": payload["investigation_id"],
+            "question": result.question,
+            "answer": result.answer,
+            "kpis_used": result.kpis_used,
+            "periods_used": result.periods_used,
+            "engine": result.engine,
+            "dataset_id": ds["_id"],
+            "status": result.status,
+            "result": payload,
+        })
+
+    return payload
 
 
 @router.get("/telemetry/summary")
@@ -417,38 +254,62 @@ def telemetry_recent(limit: int = Query(default=10, ge=1, le=50),
     return {"telemetry": [{key: item.get(key) for key in fields} for item in records]}
 
 
+# ---------------------------------------------------------------------------
+# saved agent answers
+# ---------------------------------------------------------------------------
+_PREVIEW_CHARS = 160
+
+
 @router.get("/investigations")
 def list_investigations(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """
+    Saved agent answers, newest first.
+
+    A row predating this batch has no `answer` field (it was a saved run of the
+    retired 4-stage pipeline) — it is listed with `legacy_format: true` and no
+    preview, rather than guessing at a shape it does not have.
+    """
     items = InvestigationRepository().list_for_user(user["uid"])
-    return {
-        "investigations": [
-            {
-                "id": i["_id"],
-                # Older rows predate the question-driven flow and have no
-                # question; the KPI they were run on is the right label for them.
-                "question": i.get("question") or "",
-                "title": i.get("question") or i.get("kpi_label") or i.get("kpi"),
-                "kpi": i.get("kpi"), "kpi_label": i.get("kpi_label"),
-                "timeframe": i.get("timeframe"), "baseline_timeframe": i.get("baseline_timeframe"),
-                "change_pct": i.get("change_pct"), "verdict": i.get("verdict"),
-                "headline": i.get("headline"),
-                "leading_hypothesis": i.get("leading_hypothesis"),
-                "leading_confidence": i.get("leading_confidence"),
-                "persona": i.get("persona"),
-                "created_at": i.get("created_at"),
-            }
-            for i in items
-        ]
-    }
+    rows = []
+    for i in items:
+        answer = i.get("answer")
+        if answer is None:
+            rows.append({"id": i["_id"], "legacy_format": True,
+                         "question": i.get("question") or i.get("kpi_label") or i.get("kpi") or "",
+                         "created_at": i.get("created_at")})
+            continue
+        preview = answer if len(answer) <= _PREVIEW_CHARS else answer[:_PREVIEW_CHARS].rstrip() + "…"
+        rows.append({
+            "id": i["_id"],
+            "legacy_format": False,
+            "question": i.get("question") or "",
+            "answer_preview": preview,
+            "kpis_used": i.get("kpis_used") or [],
+            "turns": (i.get("engine") or {}).get("turns"),
+            "created_at": i.get("created_at"),
+        })
+    return {"investigations": rows}
 
 
 @router.get("/investigations/{investigation_id}")
 def get_investigation(investigation_id: str,
                       user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """
+    A saved agent answer, unredacted — matching `/questions/ask`'s own
+    `redaction: "none"`, since this is exactly what that endpoint returned.
+
+    A pre-A9 row has no `result` in the new shape; it is reported as
+    `legacy_format` rather than rendered, since nothing left in this API knows
+    how to interpret the retired pipeline's payload.
+    """
     doc = InvestigationRepository().get(user["uid"], investigation_id)
     if not doc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Investigation not found.")
-    return redact_result(doc["result"], user)
+    if "answer" not in doc:
+        return {"status": "legacy_format", "id": doc["_id"],
+                "question": doc.get("question") or doc.get("kpi_label") or doc.get("kpi") or "",
+                "created_at": doc.get("created_at")}
+    return doc["result"]
 
 
 @router.delete("/investigations/{investigation_id}")

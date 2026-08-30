@@ -75,13 +75,13 @@ DEFAULT_MIN_N = 6
 # constant in the style of `scan.MAX_SCAN_KPIS`, not a `Settings` field.
 MAX_MATRIX_CANDIDATES = 30
 
-# Mirrors `contest.MIN_CROSS_SECTION_MEMBERS` / `MAX_CROSS_SECTION_MEMBERS`
-# (`engines/contest.py:125-127`) -- kept as a second copy of the two numbers
-# rather than an import, since the agent layer does not otherwise depend on
-# the legacy `engines.contest` module. Below the floor, a correlation over
-# fewer members is not meaningfully different from picking two points and
-# drawing a line; above the ceiling, a column that wide is an identifier, not
-# a business dimension.
+# Mirrored the retired `contest.MIN_CROSS_SECTION_MEMBERS` /
+# `MAX_CROSS_SECTION_MEMBERS` (`engines/contest.py`, deleted at A9) as a second
+# copy of the two numbers rather than an import, since the agent layer never
+# depended on that module. Below the floor, a correlation over fewer members
+# is not meaningfully different from picking two points and drawing a line;
+# above the ceiling, a column that wide is an identifier, not a business
+# dimension.
 MIN_AUTO_DIMENSION_MEMBERS = 3
 MAX_AUTO_DIMENSION_MEMBERS = 200
 

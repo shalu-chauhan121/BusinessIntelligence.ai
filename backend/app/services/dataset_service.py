@@ -307,10 +307,6 @@ def rebuild_reconciled_view(uid: str, dataset_id: str, as_of: Optional[str] = No
         except OSError:                              # pragma: no cover - best effort
             pass
     clear_cache(path)
-    # The frame's members have just changed. Cached interpretations key on the
-    # contract version, not on the file, so a filter bound to a member that no
-    # longer exists would survive this rebuild without it.
-    _clear_intent_cache(dataset_id)
 
     repo.col.update_one({"_id": dataset_id}, {
         "path": path, "size_bytes": len(raw_csv), "checksum": digest, "schema": schema.to_dict(),
@@ -420,15 +416,6 @@ def load(dataset: Dict[str, Any], uid: Optional[str] = None,
                                      if k not in report.withheld_kpis]
 
     return df, schema
-
-
-def _clear_intent_cache(dataset_id: Optional[str] = None) -> None:
-    """Drop cached question interpretations for a dataset whose rows changed."""
-    try:
-        from ..query.understanding import clear_intent_cache
-        clear_intent_cache(dataset_id)
-    except Exception:                                # pragma: no cover - best effort
-        log.debug("Could not clear the intent cache for %s", dataset_id)
 
 
 def clear_cache(path: Optional[str] = None) -> None:

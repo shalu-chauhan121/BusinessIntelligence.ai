@@ -1,23 +1,16 @@
 """
-The contracts between the stages of a question-driven investigation.
+Contracts for question interpretation and the KPI driver graph.
 
-These models exist so that each boundary in the pipeline is typed and testable
-rather than a loose dictionary. Two of them carry the load-bearing guarantees of
-the whole architecture:
+These models exist so that each boundary here is typed and testable rather
+than a loose dictionary.
 
-  * `MaterialSignals` is the only channel by which observed facts reach the
-    language model. Everything in it has already passed a deterministic
-    significance test, so the model is never in a position to mistake noise for
-    a finding, or to be asked to explain a change that did not happen.
-
-  * `HypothesisPrediction` is how the model proposes evidence. It states what it
-    expects a metric to have done, and the data decides whether that expectation
-    held. The model never asserts a number, a direction that was observed, or a
-    verdict.
-
-The remaining models carry the question's interpretation, the KPI relationships
-the interpretation is grounded in, and the persona-invariant substrate that
-recommendations are reframed from.
+The 4-stage pipeline's own contracts (`MaterialSignals`, `HypothesisPrediction`,
+`LlmHypothesis`, `LlmHypothesisSet`, `RecommendationCore`) were retired at A9
+along with the engines that produced and consumed them
+(`engines/{signals,hypotheses,llm_hypotheses,act,contest,investigate}.py`).
+What remains — question interpretation and the driver graph — is still load-
+bearing: `/api/questions/interpret` and `agent/relations.py`/`agent/kpi_search.py`
+both depend on it.
 """
 from __future__ import annotations
 
@@ -45,7 +38,7 @@ class PeriodSpec(BaseModel):
 
     year: int
     quarter: Optional[int] = None
-    comparison: str = "previous_period"          # matches schemas.Comparison
+    comparison: str = "previous_period"
     source: PeriodSource = "inferred_default"
     # Shown to the reader whenever the period was not stated outright, so an
     # assumed timeframe is never mistaken for one the question asked for.
@@ -156,7 +149,7 @@ class DriverGraph(BaseModel):
 
     outcome_kpi: str
     edges: List[DriverEdge] = Field(default_factory=list)
-    # Dimension members that actually moved the KPI, from `determine_focus`.
+    # Dimension members that actually moved the KPI, from `observe.determine_focus`.
     dimension_drivers: List[Dict[str, Any]] = Field(default_factory=list)
     # Dimensions that proved to carry real explanatory signal for this KPI.
     # The contract copies every dataset dimension onto every KPI, so relevance
@@ -168,114 +161,3 @@ class DriverGraph(BaseModel):
     def driver_metrics(self) -> List[str]:
         """Every KPI that may legitimately appear in a hypothesis prediction."""
         return sorted({e.source_kpi for e in self.edges})
-
-
-# ---------------------------------------------------------------------------
-# the material-signal boundary
-# ---------------------------------------------------------------------------
-class MaterialSignals(BaseModel):
-    """
-    The observed facts, filtered to what actually matters.
-
-    This is the only path by which numbers reach the hypothesis prompt. A KPI
-    that moved within normal variation is carried as context flagged
-    `moved=False` — never as a change to be explained — because a question like
-    "why did profit fall even though CAC was flat" needs the flat metric present
-    in order to be answerable at all.
-
-    When `nothing_material` is true the pipeline reports that there is nothing to
-    explain and generates no hypotheses. Asking a language model to explain noise
-    reliably produces an explanation, which is precisely the failure to avoid.
-    """
-
-    outcome_kpi: str
-    material: List[Dict[str, Any]] = Field(default_factory=list)
-    context: List[Dict[str, Any]] = Field(default_factory=list)
-    focus_members: List[Dict[str, Any]] = Field(default_factory=list)
-    signals_considered: int = 0
-    signals_retained: int = 0
-    nothing_material: bool = False
-    filter_note: str = ""
-
-
-# ---------------------------------------------------------------------------
-# LLM hypothesis contract
-# ---------------------------------------------------------------------------
-Direction = Literal["up", "down"]
-
-
-class HypothesisPrediction(BaseModel):
-    """
-    A falsifiable claim about a metric, made before the data is consulted.
-
-    The generator says what it expects; `engines.hypotheses.evidence` measures
-    what happened and flips the stance to "contradicting" when the metric moved
-    the other way or did not move at all. A hypothesis therefore cannot claim
-    support it does not have, however plausible its wording.
-    """
-
-    metric: str
-    expected_direction: Direction
-    scope: Optional[Dict[str, str]] = None
-    # The change that would count as full strength for this prediction, in
-    # percent. Mirrors the `reference` argument the evidence helper already uses.
-    reference_pct: float = 5.0
-    weight: float = 1.0
-    rationale: str = ""
-
-
-class LlmHypothesis(BaseModel):
-    """One proposed mechanism, in the shape the deterministic engines consume."""
-
-    key: str
-    title: str
-    statement: str
-    mechanism: str = ""
-    family: str = "other"
-    predictions: List[HypothesisPrediction] = Field(default_factory=list, max_length=6)
-    cause_metric: Optional[str] = None
-    cause_direction: Optional[Direction] = None
-    reverse_causation_risk: str = ""
-    # What would have to be true for this hypothesis to be wrong. Supplied per
-    # hypothesis so the disconfirmation search is driven by the hypothesis
-    # itself rather than by a lookup table of known template keys.
-    contradiction_queries: List[str] = Field(default_factory=list, max_length=4)
-    rag_queries: List[str] = Field(default_factory=list, max_length=4)
-    missing: List[str] = Field(default_factory=list)
-    # Whether this came from reasoning about the detected industry, or from the
-    # general business mechanisms that apply to any operation. Both categories
-    # are asked for; neither is fabricated when the data cannot support it.
-    domain_specific: bool = False
-
-
-class LlmHypothesisSet(BaseModel):
-    hypotheses: List[LlmHypothesis] = Field(default_factory=list, max_length=10)
-    generation_note: str = ""
-
-
-# ---------------------------------------------------------------------------
-# persona-invariant recommendation substrate
-# ---------------------------------------------------------------------------
-class RecommendationCore(BaseModel):
-    """
-    The facts a recommendation must rest on, before any persona sees it.
-
-    Every persona's advice is generated from this same object, so two readers
-    can be told to do different things but never for different reasons. The
-    cause metric and evidence references are the constraint: a reframing that
-    reaches outside them is not a reframing, it is an invention.
-    """
-
-    hypothesis_key: str
-    hypothesis_title: str
-    cause_metric: Optional[str] = None
-    cause_direction: Optional[str] = None
-    confidence: float = 0.0
-    confidence_label: str = ""
-    causal_claim: str = ""
-    supporting_evidence: List[str] = Field(default_factory=list)
-    contradicting_evidence: List[str] = Field(default_factory=list)
-    missing_evidence: List[str] = Field(default_factory=list)
-    affected_areas: List[str] = Field(default_factory=list)
-    monitoring_threshold: Optional[Dict[str, Any]] = None
-    what_would_change_this: List[str] = Field(default_factory=list)

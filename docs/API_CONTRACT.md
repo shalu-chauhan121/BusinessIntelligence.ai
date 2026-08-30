@@ -171,121 +171,56 @@ in that basis is dropped rather than shown.
 
 ## Analysis
 
-Shared request body (all fields optional). **`/api/questions/ask` does not take this body** —
-it has its own, narrower one; see below.
-
-```json
-{
-  "kpi": "revenue",                    // defaults to revenue, or the first available KPI
-  "year": 2026,                        // defaults to the latest period in the data
-  "quarter": 2,                        // 1-4, or null for the full year
-  "comparison": "previous_period",     // or "year_over_year"
-  "dataset_id": null,                  // defaults to the active dataset
-  "use_llm": true,                     // false forces the deterministic reasoner
-  "persist": true                      // save to investigation history
-}
-```
+**A9 retired the fixed 4-stage pipeline** (`observe → investigate → contest → act`) and the six
+endpoints built around it: the four stage endpoints (`/observe`, `/investigate`, `/contest`,
+`/act`), `/api/investigations/run`, and `/api/questions/investigate`. `POST /api/questions/ask`
+— the agent loop — is now the only way this API answers a business question. What survives
+alongside it: `/api/dashboard` (still the `observe` engine, for the KPI-driven dashboard view),
+`/api/questions/interpret` (question grounding alone, with nothing run), and `/api/investigations`
+(now a history of saved agent answers, not saved pipeline runs).
 
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/api/dashboard?year=&quarter=&kpi=&comparison=` | Everything the dashboard needs |
 | `GET` | `/api/meta/timeframes` | Available periods + KPI catalogue |
-| `POST` | `/api/observe` | Stage 1 only — KPI or `question` |
-| `POST` | `/api/investigate` | Stages 1–2 — KPI or `question` |
-| `POST` | `/api/contest` | Stages 1–3 — KPI or `question` |
-| `POST` | `/api/act` | Stage 4 (runs 1–3 internally) — KPI or `question`, reframed for `persona` |
-| `POST` | `/api/investigations/run` | All four stages for an explicitly named KPI, persisted |
 | `POST` | `/api/questions/interpret` | How a question is read, without running it |
-| `POST` | `/api/questions/investigate` | Ask a business question — **used by the UI** |
 | `POST` | `/api/questions/ask` | Ask a business question of the agent loop — prose answer + full evidence trail |
-| `GET` | `/api/investigations` | History |
-| `GET` | `/api/investigations/{id}` | A saved investigation |
+| `GET` | `/api/investigations` | Saved agent answers, newest first |
+| `GET` | `/api/investigations/{id}` | A saved agent answer, unredacted |
 | `DELETE` | `/api/investigations/{id}` | Delete one |
 
-Each stage endpoint recomputes the stages before it, so any one can be called standalone —
-this is what let the frontend be built against a stable contract while the engines were still
-being written.
+### `POST /api/questions/interpret`
 
-**Every single-stage endpoint accepts either an explicit `kpi`/`year`/`quarter` (the original
-contract) or a `question`** (resolved against the KPI contract exactly as `/api/questions/investigate`
-resolves one). When both are given the question wins. An unresolvable question returns
-`{"status": "needs_clarification", ...}` rather than the stage's normal shape — check `status` before
-reading `observe`/`investigate`/`contest`/`act`. All four route through the same
-`pipeline.prepare_stage_context` the full pipeline uses, so a single-stage call and
-`/api/questions/investigate` never disagree about what counts as a material signal or a driver.
-
-### Question-driven investigation
-
-An investigation starts from a question, not a KPI selection. Which KPI, which period and which
-comparison are resolved from the question against the dataset's KPI contract.
+Reads a question against the dataset's KPI contract — which KPI, which period — without running
+anything. Cheap by design.
 
 ```
-POST /api/questions/investigate
+POST /api/questions/interpret
 { "question": "Why did profit fall in Q4 even though revenue held?",
-  "dataset_id": null, "persona": null, "use_llm": true, "persist": true }
+  "dataset_id": null, "use_llm": true }
 ```
-
-Two shapes come back. A resolved question returns the usual
-`{observe, investigate, contest, act, engine}` envelope plus `question`, `intent`, `comparisons`
-and `assumptions`, with `status: "ok"`.
-
-A question that cannot be resolved returns **HTTP 200** with:
 
 ```json
-{
-  "status": "needs_clarification",
-  "intent": { "...": "the partial reading" },
-  "ambiguities": [
-    { "kind": "outcome_unresolved", "blocking": true,
-      "message": "No KPI in this dataset matches what the question is asking about. This dataset measures: Admissions, Recovery rate, ...",
-      "candidates": [ { "kpi_key": "recovery_rate", "label": "Recovery rate" } ] }
-  ]
-}
+{ "intent": { "outcome": { "kpi_key": "gross_profit", "label": "Gross profit" }, "...": "…" },
+  "blocked": false, "assumptions": [] }
 ```
-
-This is a normal branch, not an error. `blocking` draws one line, and it is between *nothing* and
-*several*:
-
-* **Nothing matched** (`outcome_unresolved`), or a period the dataset does not hold
-  (`unsupported_by_dataset`) — the run stops and asks. There is no answer to give, and investigating
-  the nearest KPI produces a confident answer to a question the user did not ask.
-* **Several matched** (`outcome_multiple`) — the run proceeds. Every candidate is a KPI the dataset
-  genuinely measures, so the best-scoring one is used, `assumed` names the key that was taken,
-  `candidates` lists the others, and the disclosure appears in `assumptions`. When a model is
-  available it breaks the tie, constrained to the tied candidates. **This no longer blocks.**
-* **A vague period** (`period_vague`, `comparison_assumed`) — proceeds on a stated default, disclosed
-  the same way.
-
-A non-blocking tie looks like this, inside the ordinary `status: "ok"` envelope:
-
-```json
-{ "kind": "outcome_multiple", "blocking": false, "assumed": "bed_occupancy_rate",
-  "message": "Read as 'Bed occupancy rate'. It scored level with 'Recovery rate', so ask again naming the measure if that is not what you meant.",
-  "candidates": [ { "kpi_key": "bed_occupancy_rate", "label": "Bed occupancy rate" } ] }
-```
-
-`POST /api/questions/interpret` returns `{intent, blocked, assumptions}` and runs nothing. It backs
-the panel showing how the question was read, so a misreading can be corrected before an
-investigation runs.
 
 **A model can never introduce a KPI.** Any key it returns is validated against the dataset's
-resolver; an unrecognised one degrades to a clarification rather than to an investigation of
-something the dataset does not measure.
+resolver; an unrecognised one is discarded rather than believed.
 
 ### Agentic question answering — `POST /api/questions/ask`
 
-The four stages above run a fixed sequence for one KPI. This endpoint does not: a model receives
-the question and all 56 analysis tools, decides which to call and in what order, and writes the
-answer itself. There are no narrative templates behind it — **the prose in `answer` is the entire
-answer**, and `evidence` is the complete list of tool calls that produced it.
+A model receives the question and all 56 analysis tools, decides which to call and in what order,
+and writes the answer itself. There are no narrative templates behind it — **the prose in `answer`
+is the entire answer**, and `evidence` is the complete list of tool calls that produced it.
 
 ```
 POST /api/questions/ask
-{ "question": "What was revenue in all odd-numbered years?", "dataset_id": null }
+{ "question": "What was revenue in all odd-numbered years?", "dataset_id": null, "persist": false }
 ```
 
-No `persona`, `use_llm` or `persist`: the loop has no persona seam, no deterministic fallback, and
-saves nothing.
+No `persona` or `use_llm`: the loop has no persona seam and no deterministic fallback.
+`persist` (default `false`) saves the answer — see below.
 
 ```json
 {
@@ -303,12 +238,12 @@ saves nothing.
   "engine": { "turns": 2, "model": "claude-opus-5", "seconds": 3.1 },
   "dataset": { "id": "ds_…", "filename": "…" },
   "view": { "role": "business_leader", "analyst_detail_included": false, "redaction": "none" },
-  "telemetry": { … }
+  "telemetry": { … },
+  "investigation_id": null
 }
 ```
 
-**Every ending of the loop is HTTP 200 with a typed `status`**, the same way
-`/questions/investigate` returns `needs_clarification` at 200. Check `status` before reading
+**Every ending of the loop is HTTP 200 with a typed `status`.** Check `status` before reading
 `answer`:
 
 | `status` | What happened | What to render |
@@ -323,15 +258,16 @@ saves nothing.
 `view.redaction` is always `"none"` to say so. `view.analyst_detail_included` keeps the meaning it
 has everywhere else — whether the caller holds the Data Analyst role — so a client can read it
 uniformly; it simply does not govern anything on this endpoint. Showing how an answer was reached
-is the product here, not an analyst privilege. This is the one place `## The black-box principle`
-below is deliberately inverted: the box is open.
+is the product here, not an analyst privilege.
 
-**Nothing is persisted.** An answer has no KPI, verdict or leading hypothesis — the fields a saved
-investigation is shaped around — so this does not appear under `GET /api/investigations`.
+**`persist: true` saves the answer**, only when `status` is `"ok"` — a truncated or refused run has
+no durable answer worth keeping. `investigation_id` is set on the response and the row appears
+under `GET /api/investigations`; without it, nothing is written.
 
-**This endpoint declares a response model**, unlike its four stage neighbours, for the reason given
-under `## KPI contract` below: the shape is already frozen and is the artefact a client depends on,
-so it belongs in `/openapi.json`. The five `status` values are published as an enum there.
+**This endpoint declares a response model**, unlike the retired stage endpoints, for the reason
+given under `## KPI contract` below: the shape is already frozen and is the artefact a client
+depends on, so it belongs in `/openapi.json`. The five `status` values are published as an enum
+there.
 
 | Status | When |
 |---|---|
@@ -341,230 +277,21 @@ so it belongs in `/openapi.json`. The five `status` values are published as an e
 
 A question the loop could not answer is **never** one of these — it is a 200 with a `status`.
 
-### Stage 1 — `observe`
+### `GET /api/investigations` / `GET /api/investigations/{id}`
 
 ```json
-{
-  "kpi": "revenue", "kpi_label": "Revenue", "unit": "currency", "higher_is_better": true,
-  "timeframe":          { "year": 2026, "quarter": 2, "label": "2026-Q2", "pretty": "Q2 2026" },
-  "baseline_timeframe": { "year": 2026, "quarter": 1, "label": "2026-Q1", "pretty": "Q1 2026" },
-  "comparison": "previous_period",
-  "current_value": 3671325.4, "baseline_value": 4433063.2,
-  "change_abs": -761737.8, "change_pct": -17.18,
-  "direction": "down", "is_unfavourable": true,
-  "anomaly": true, "verdict": "meaningful_signal",
-
-  "significance": {
-    "method": "seasonal_robust_z",          // analyst-only from here …
-    "robust_z": -9.2, "median_historical_change_pct": 6.31, "robust_sigma_pct": 2.55,
-    "history_points": 12, "same_quarter_points": 3,
-    "z_threshold": 2.0, "material_threshold_pct": 3.0,
-    "is_material": true, "is_statistically_unusual": true, "is_anomaly": true,
-    "expected_value": 4712594.3, "normal_range": [4486222.1, 4938966.6],
-    "historical_changes": [ { "period": "2024-Q2", "from": "2024-Q1", "change_pct": 6.31 } ],
-    "statistical_power": "Good: the comparison is restricted to …",
-    "dispersion_note": "The same-quarter sample was too small …",
-    "explanation": "…"                      // … leader-only replacement for the above
-  },
-
-  "drivers": {                                // analyst only; {} for a leader
-    "region": [ { "name": "North", "current": 780281.3, "baseline": 1271465.9,
-                  "change_abs": -491184.6, "change_pct": -38.63,
-                  "contribution_pct": 64.5, "share_of_current_pct": 21.3,
-                  "share_of_baseline_pct": 28.7, "over_index": 2.24,
-                  "effects": null } ]
-  },
-  "top_drivers": [ { "dimension": "product", "name": "Product A",
-                     "contribution_pct": 78.3, "over_index": 1.85,
-                     "is_disproportionate": true, … } ],
-  "driver_concentration_pct": 64.5,
-
-  "series": { "quarterly": [ { "period": "2023-Q1", "year": 2023, "quarter": 1, "value": … } ],
-              "weekly":    [ { "week": "2025-12-29", "value": … } ] },
-
-  "kpi_scoreboard": [ { "key": "orders", "label": "Orders", "unit": "count",
-                        "higher_is_better": true, "current": 4027, "baseline": 4879,
-                        "change_pct": -17.46, "is_primary": false } ],
-
-  "rows_analysed": 624, "baseline_rows": 624, "data_warnings": []
-}
+{ "investigations": [
+  { "id": "inv_…", "legacy_format": false,
+    "question": "What was revenue in all odd-numbered years?",
+    "answer_preview": "Revenue across 2023 and 2025 — the odd-numbered years your data covers …",
+    "kpis_used": ["revenue"], "turns": 2, "created_at": "2026-08-30T10:00:00+00:00" }
+] }
 ```
 
-`verdict` ∈ `meaningful_signal` · `within_normal_variation` · `statistically_unusual_but_immaterial`.
-
-### Stage 2 — `investigate`
-
-```json
-{
-  "focus": { "region": "North", "product": "Product A" },
-  "focus_label": "North / Product A",
-  "hypotheses": [ {
-    "key": "supply_constraint",
-    "title": "Supply constraint limited what could be sold",
-    "family": "supply",
-    "statement": "…",
-    "evidence": [ { "type": "structured", "stance": "supporting",
-                    "metric": "fulfillment_rate", "label": "Fulfilment rate",
-                    "scope": "whole business", "baseline": 100.0, "current": 92.93,
-                    "change_abs": -7.07, "change_pct": -7.07, "unit": "percent",
-                    "strength": 1.0, "weight": 1.3,          // analyst only
-                    "detail": "Fulfilment rate in whole business: 100.0% → 92.9% (-7.1 pts …).",
-                    "note": "", "source": "Structured data analysis (uploaded dataset)" } ],
-    "documentary_evidence": [ { "type": "unstructured", "stance": "supporting",
-                                "source": "ops_supply_incident_report_2026.md",
-                                "doc_type": "operations_report",
-                                "section": "1. Incident summary",
-                                "quote": "On 4 May 2026 our tier-1 component supplier …",
-                                "relevance": 1.0, "strength": 0.863, "score": 7.77,
-                                "chunk_id": "doc_…_c0002", "document_id": "doc_…" } ],
-    "missing": [ "Supplier lead-time and on-time-in-full data is not present …" ],
-    "cause_metric": "stockout_rate", "cause_direction": "up",
-    "prior_support": 4.32, "prior_against": 0.0
-  } ],
-  "considered_count": 10,                 // analyst only
-  "not_carried_forward": [ … ],           // analyst only
-  "documents_indexed": 21, "rag_available": true,
-  "llm_used": false, "llm_note": null,
-  "method_note": "Hypotheses are generated from a library of business explanations …"
-}
-```
-
-### Stage 3 — `contest`
-
-```json
-{
-  "ranking": [ { "rank": 1, "key": "demand_contraction",
-                 "title": "Underlying customer demand contracted",
-                 "confidence": 71, "band": "strong",
-                 "status": "well_supported", "causally_consistent": true } ],
-  "hypotheses": [ {
-    "…all Stage 2 fields…",
-    "contest": {
-      "temporal": {
-        "status": "kpi_precedes_cause",     // cause_precedes_kpi | simultaneous | undetermined | not_applicable
-        "detail": "The KPI began moving in 2026-04-06, 4 week(s) BEFORE the proposed cause moved …",
-        "lag_weeks": 4,
-        "kpi_onset_week": "2026-04-06", "cause_onset_week": "2026-05-04",
-        "cause_metric": "stockout_rate", "cause_metric_label": "Stockout rate",
-        "scope": "North / Product A"
-      },
-      "temporal_series": { "kpi": [ { "week": "…", "value": … } ],
-                           "cause": [ … ] },              // analyst only
-      "consistency": {
-        "status": "checked", "dimension": "region",
-        "correlation": { "r": 0.38, "r_squared": 0.144, "n": 4,
-                         "interpretation": "Across 4 members … not proof of causation." },
-        "counterexamples": [ { "member": "South", "kpi_change_pct": -6.1,
-                               "cause_change_pct": 1.2 } ],
-        "members": [ … ],                                  // analyst only
-        "detail": "…"
-      },
-      "mechanism": {
-        "declared_risk": "Marketing spend is frequently budgeted as a percentage of revenue …",
-        "lead_lag": { "verdict": "simultaneous", "best": { "lag_weeks": 0, "r": 0.78, "n": 25 },
-                      "r_at_lag_0": 0.78, "profile": [ … ], "detail": "…" },
-        "reverse_causation_suspected": true,
-        "conclusion": "Reverse causation cannot be ruled out …"
-      },
-      "contradictory_evidence": [ { "…document evidence…",
-                                    "contrast_markers": ["does not explain","before any"],
-                                    "classified_by": "lexical_contrast_heuristic" } ]
-    },
-    "scoring": {
-      "confidence": 55, "confidence_band": "moderate", "status": "partially_supported",
-      "confidence_label": "Evidence-based confidence (not a probability)",
-      "support_score": 6.94, "against_score": 3.20, "missing_penalty": 0.30,  // analyst only
-      "score_ledger": [ { "side": "for", "source": "structured",
-                          "label": "Fulfilment rate", "value": 1.3 } ],        // analyst only
-      "cap_reason": "Capped: the KPI began moving before this cause did …",
-      "causal_claim": "Association only. …",
-      "causally_consistent": false
-    },
-    "reasoning_trail": [ { "step": "Temporal precedence checked", "detail": "…" } ]
-  } ],
-  "ambiguity_note": "The evidence does not separate 'A' from 'B' (58% vs 56%) …",
-  "unresolved_questions": [ … ],
-  "confidence_disclaimer": "Confidence scores are evidence-strength scores … not probabilities …"
-}
-```
-
-### Stage 4 — `act`
-
-```json
-{
-  "narrative": {
-    "headline": "Revenue fell -17.2% in Q2 2026 versus Q1 2026.",
-    "what_changed": "Revenue moved from 4,433,063 in Q1 2026 to 3,671,325 in Q2 2026 (-17.2%).",
-    "how_significant": "This is outside revenue's normal variation: the move is 9.2 robust standard deviations …",
-    "what_drove_it": "The change is concentrated in Product A (product, 78% of the change, 1.8x its size) …",
-    "leading_explanation": "The strongest-evidenced explanation is “…” at 71% …",
-    "what_we_are_not_sure_about": [ "…" ]
-  },
-  "recommendations": [ {
-    "id": "rec_demand_contraction",
-    "title": "Address the demand shortfall directly",
-    "based_on": { "hypothesis": "Underlying customer demand contracted", "key": "demand_contraction",
-                  "confidence": 71, "band": "strong", "status": "well_supported" },
-    "priority": "high", "horizon": "This quarter", "owner": "Sales / commercial leadership",
-    "actions": [ "Run a win-back and retention programme against the accounts in North / Product A …" ],
-    "rationale": "…",
-    "supporting_evidence": [ "Orders in North: 1,395 → 866 (-37.9%)." ],
-    "documentary_evidence": [ "customer_feedback_q2_2026.md: \"…\"" ],
-    "counter_evidence": [ "…" ],
-    "monitoring": [ { "metric": "orders", "label": "Orders", "unit": "count",
-                      "weekly_median": 348.0, "robust_sigma": 31.13,
-                      "upper_alert": 410.27, "lower_alert": 285.73,
-                      "rule": "Alert when the weekly orders moves outside 285.73 – 410.27 …" } ],
-    "what_would_change_this": [ "…" ]
-  } ],
-  "ranking": [ … ],
-  "llm_story": null,                       // populated when ANTHROPIC_API_KEY is set
-  "limits": [ "This analysis explains the data that was uploaded. …" ]
-}
-```
-
-### `POST /api/investigations/run`
-
-```json
-{
-  "investigation_id": "inv_…",
-  "dataset": { "id": "ds_…", "filename": "…", "rows": 8784 },
-  "observe": { … }, "investigate": { … }, "contest": { … }, "act": { … },
-  "engine": {
-    "llm": { "provider": "anthropic", "enabled": false, "mode": "deterministic_fallback", … },
-    "stage_seconds": { "observe": 0.42, "investigate": 0.31, "contest": 0.55, "act": 0.12 },
-    "total_seconds": 1.40,
-    "pipeline": ["observe","investigate","contest","act"]
-  },
-  "telemetry": {
-    "trace_id": "trc_…",
-    "start_time": "2026-08-23T10:00:00+00:00",
-    "end_time": "2026-08-23T10:00:01+00:00",
-    "duration_ms": 1400,
-    "model_name": "claude-sonnet-4-5",
-    "model_calls": 3,
-    "prompt_tokens": 1200, "completion_tokens": 400, "total_tokens": 1600,
-    "estimated_cost": 0.0096,
-    "status": "success",
-    "processing": {
-      "llm": { "label": "LLM Processing", "step_count": 3, "duration_ms": 800 },
-      "non_llm": { "label": "Non-LLM Processing", "step_count": 4, "duration_ms": 600 }
-    },
-    "errors": []
-  },
-  "view": { "role": "data_analyst", "analyst_detail_included": true }
-}
-```
-
----
-
-## The black-box principle
-
-The stage contracts above were fixed before the engines were written. Any stage can be served
-by mock data, by the deterministic engine, or by the full engine plus the LLM, and the
-frontend cannot tell the difference. That is what allowed the frontend, backend and analysis
-work to proceed in parallel — and it is why swapping BM25 for a vector index, or the JSON
-store for Atlas, changes nothing above this line.
+`GET /api/investigations/{id}` returns the full saved `/questions/ask` response body, unredacted
+for every role — the same `redaction: "none"` reasoning as the live endpoint. A row saved before
+A9 (a run of the retired pipeline) has no `answer` field; it is reported as
+`{"status": "legacy_format", "id", "question", "created_at"}` rather than rendered.
 
 ---
 

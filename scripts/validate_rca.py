@@ -1,10 +1,10 @@
 """
 Score the root-cause analysis against the planted ground truth.
 
-Runs the REAL pipeline -- the same `observe`/`investigate`/`contest` the API calls,
-with no API key and no mocks -- over sample_data/business_metrics_sample.csv, then
-compares what it found against sample_data/ground_truth.json, which the generator
-emitted from counterfactual re-simulations.
+Runs the REAL engine -- `engines.observe.observe`, the same one `/api/dashboard`
+calls, with no API key and no mocks -- over sample_data/business_metrics_sample.csv,
+then compares what it found against sample_data/ground_truth.json, which the
+generator emitted from counterfactual re-simulations.
 
     python scripts/validate_rca.py           # print the scorecard
     make validate                            # same, plus writes docs/rca_validation.json
@@ -13,6 +13,15 @@ Every bar is declared in CHECKS below rather than buried in prose, and
 backend/tests/test_rca_ground_truth.py asserts the same scorecard, so a
 regression in driver ranking fails the build rather than quietly degrading a
 number nobody re-reads.
+
+Scoped to `observe` alone since A9 retired the `investigate`/`contest` stages
+this used to run through: `determine_focus` (moved to `engines/observe.py` at
+A9, since this script's temporal-ordering check is the one thing that still
+needs it) replaces the `investigate` call, and the informational
+`supply_hypothesis_capped` check that read `contest`'s hypothesis ranking is
+gone -- it was guarded by `if supply:` and, with no API key, the deterministic
+floor never produced a supply hypothesis for it to fire on, so nothing here
+was actually exercising it.
 """
 from __future__ import annotations
 
@@ -77,23 +86,21 @@ def matches_locus(driver, locus) -> bool:
 
 
 def run_pipeline():
-    """The real engines, over the real sample data, with no LLM."""
+    """The real engine, over the real sample data. No LLM, no API key."""
     from tests.base import setup_environment                    # noqa: E402
 
     state = setup_environment()
     from app.engines.analysis import price_volume_decomposition  # noqa: E402
-    from app.engines.contest import contest                      # noqa: E402
-    from app.engines.investigate import investigate              # noqa: E402
-    from app.engines.observe import Timeframe, observe, slice_period  # noqa: E402
+    from app.engines.observe import (Timeframe, determine_focus, observe,   # noqa: E402
+                                     slice_period)
 
     df, schema, uid = state["df"], state["schema"], state["uid"]
     tf = Timeframe(2026, 2)
     observation = observe(df, schema, "revenue", tf)
-    investigation = investigate(df, schema, observation, uid, llm=None)
-    contested = contest(df, schema, observation, investigation, uid, llm=None)
+    focus = determine_focus(observation)
     pv = price_volume_decomposition(slice_period(df, tf), slice_period(df, tf.previous()))
     return {"df": df, "schema": schema, "uid": uid, "observation": observation,
-            "investigation": investigation, "contest": contested, "price_volume": pv}
+            "focus": focus, "price_volume": pv}
 
 
 def score(truth, run):
@@ -222,12 +229,12 @@ def score(truth, run):
     #    demonstrable without one.
     from app.engines.analysis import compare_onsets, detect_onset, weekly_frame  # noqa: E402
 
-    #    Scoped to the focus the engine itself selected (North x Product A), the
-    #    way `contest.temporal_check` scopes it. Widening to Product A across all
-    #    regions dilutes the fulfilment collapse into three unaffected regions'
-    #    noise, and the onset detector then fires on a February wobble.
+    #    Scoped to the focus the engine itself selected (North x Product A).
+    #    Widening to Product A across all regions dilutes the fulfilment
+    #    collapse into three unaffected regions' noise, and the onset detector
+    #    then fires on a February wobble.
     df = run["df"]
-    focus = run["investigation"].get("focus") or {}
+    focus = run["focus"] or {}
     window = df[(df["_date"] >= "2025-10-01") & (df["_date"] <= "2026-06-30")]
     scoped = window
     for dim, member in focus.items():
@@ -246,18 +253,6 @@ def score(truth, run):
            f"-> {verdict.get('status')} (lag {verdict.get('lag_weeks')}w). "
            f"{ordering['why']}"),
           verdict.get("status"), "kpi_precedes_cause")
-
-    # 8b. informational: if an LLM proposed a supply hypothesis, did CONTEST cap it?
-    supply = next((h for h in (run["contest"].get("hypotheses") or [])
-                   if "suppl" in (h.get("family", "") + h.get("title", "")).lower()), None)
-    if supply:
-        status = (supply.get("contest") or {}).get("temporal", {}).get("status")
-        check("supply_hypothesis_capped",
-              status == "kpi_precedes_cause" and (supply["scoring"].get("cap_reason") or ""),
-              f"supply hypothesis temporal={status!r}, "
-              f"confidence={supply['scoring']['confidence']}, "
-              f"cap={supply['scoring'].get('cap_reason') or 'none'}",
-              status, "kpi_precedes_cause")
 
     # 9. mechanism separation -- a demand-led decline must read as volume, not price
     pv = run.get("price_volume") or {}

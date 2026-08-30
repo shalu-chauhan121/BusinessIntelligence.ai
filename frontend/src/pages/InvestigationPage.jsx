@@ -1,17 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Database, Quote, Sparkles } from 'lucide-react'
-import TrendChart from '../components/charts/TrendChart'
-import DriverChart from '../components/charts/DriverChart'
-import ClarificationPrompt from '../components/ClarificationPrompt'
-import HypothesisCard from '../components/HypothesisCard'
-import IntentPanel from '../components/IntentPanel'
+import { AlertTriangle, ChevronRight, Database, Sparkles, Wrench } from 'lucide-react'
 import QuestionBar from '../components/QuestionBar'
-import Recommendations from '../components/Recommendations'
-import { AnalystOnly, Badge, Callout, EmptyState, ErrorState, LoadingCard, SectionTitle, Spinner } from '../components/ui'
-import { useAuth } from '../context/AuthContext'
+import { Badge, EmptyState, ErrorState, LoadingCard, SectionTitle } from '../components/ui'
 import { api } from '../lib/api'
-import { STAGES, VERDICT_COPY, formatDelta, formatValue, titleCase } from '../lib/format'
 
 /**
  * Example questions, built from the KPIs this dataset actually has.
@@ -33,14 +25,38 @@ function exampleQuestions(meta) {
   return examples
 }
 
+// One narrative source: the model's own prose in `answer`. Every other status
+// still renders that same field (it is populated even on `truncated`), with a
+// banner above it saying the run did not finish cleanly.
+const STATUS_BANNER = {
+  max_turns_exhausted: {
+    tone: 'warning',
+    label: 'Ran out of turns before concluding',
+    detail: 'The answer below reflects what the model had established when its turn budget ran out.',
+  },
+  truncated: {
+    tone: 'warning',
+    label: 'Answer cut off',
+    detail: 'The model’s final turn hit the output-token limit — the answer below may be incomplete.',
+  },
+  refused: {
+    tone: 'critical',
+    label: 'Declined to answer',
+    detail: 'A safety classifier declined this question. Try rephrasing rather than resubmitting unchanged.',
+  },
+  llm_required: {
+    tone: 'critical',
+    label: 'No reasoning model configured',
+    detail: 'This deployment has no ANTHROPIC_API_KEY set, so the agent loop cannot run.',
+  },
+}
+
 export default function InvestigationPage() {
   const { investigationId } = useParams()
-  const { isAnalyst } = useAuth()
-  const [stage, setStage] = useState('observe')
   const [meta, setMeta] = useState(null)
   const [question, setQuestion] = useState('')
   const [result, setResult] = useState(null)
-  const [clarification, setClarification] = useState(null)
+  const [legacy, setLegacy] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
@@ -53,12 +69,17 @@ export default function InvestigationPage() {
   useEffect(() => {
     if (!investigationId) return
     setBusy(true)
+    setLegacy(null)
     api
       .getInvestigation(investigationId)
       .then((data) => {
-        setResult(data)
-        setQuestion(data.question || '')
-        setStage('act')
+        if (data.status === 'legacy_format') {
+          setLegacy(data)
+          setResult(null)
+        } else {
+          setResult(data)
+          setQuestion(data.question || '')
+        }
       })
       .catch(setError)
       .finally(() => setBusy(false))
@@ -69,30 +90,20 @@ export default function InvestigationPage() {
     if (!text) return
     setBusy(true)
     setError(null)
-    setClarification(null)
+    setLegacy(null)
     setQuestion(text)
     try {
-      const data = await api.askQuestion({ question: text, use_llm: true, persist: true })
-      // An unresolvable question is a normal branch, not a failure: the server
-      // returns what it needs settled rather than investigating something near.
-      if (data.status === 'needs_clarification') {
-        setClarification(data)
-        setResult(null)
-      } else {
-        setResult(data)
-        setClarification(null)
-        setStage('observe')
-      }
+      // Every ending of the loop is HTTP 200 with a typed `status` — a
+      // question the model could not converge on is a normal branch here,
+      // rendered by `AnswerCard`, not a caught error.
+      const data = await api.askAgent({ question: text, persist: true })
+      setResult(data)
     } catch (e) {
       setError(e)
     } finally {
       setBusy(false)
     }
   }, [question])
-
-  const askAbout = useCallback((candidate) => {
-    ask(`Why did ${(candidate.label || candidate.kpi_key).toLowerCase()} change?`)
-  }, [ask])
 
   if (error && error.status === 409) {
     return (
@@ -114,7 +125,7 @@ export default function InvestigationPage() {
       <SectionTitle
         eyebrow="Question-driven investigation"
         title="Ask a business question"
-        description="Ask what you actually want to know. The system works out which KPI you mean from your dataset's contract, establishes what changed, proposes explanations for a business of this kind, and then tries to break each one."
+        description="Ask what you actually want to know. A reasoning model decides which analysis tools to call, pulls real numbers from your data, and writes the answer itself — every figure in it comes from a tool call you can inspect below."
       />
 
       <QuestionBar
@@ -127,50 +138,139 @@ export default function InvestigationPage() {
 
       {error && error.status !== 409 ? (
         <ErrorState
-          title="The investigation could not be completed"
+          title="The question could not be answered"
           message={error.message}
           onRetry={() => ask()}
         />
       ) : null}
 
-      {clarification ? (
-        <ClarificationPrompt
-          ambiguities={clarification.ambiguities}
-          onChoose={askAbout}
-          busy={busy}
-        />
-      ) : null}
+      {busy && !result && !legacy ? <LoadingCard label="Working out which tools to call…" lines={6} /> : null}
 
-      {busy && !result ? <LoadingCard label="Understanding, observing, investigating, contesting and acting…" lines={6} /> : null}
-
-      {!result && !busy && !clarification ? (
+      {!result && !legacy && !busy ? (
         <EmptyState
           icon={Sparkles}
           title="Ask anything about this data"
-          message="Describe what happened and what puzzles you about it. Every number in the answer is computed from your uploaded data, and every quotation comes from a document you uploaded."
+          message="Describe what happened and what puzzles you about it. Every number in the answer is computed by a tool call against your uploaded data."
+        />
+      ) : null}
+
+      {legacy ? (
+        <EmptyState
+          icon={AlertTriangle}
+          title="Saved before this page's current format"
+          message={`"${legacy.question || 'This investigation'}" was saved by an earlier version of this product and can no longer be rendered. Ask the question again to get a fresh answer.`}
+          action={
+            <button type="button" className="btn-primary" onClick={() => ask(legacy.question)}>
+              Ask it again
+            </button>
+          }
         />
       ) : null}
 
       {result ? (
         <>
-          <IntentPanel
-            intent={result.intent}
-            assumptions={result.assumptions}
-            onCorrect={() => {
-              setResult(null)
-              setClarification(null)
-            }}
-          />
-          <StageNav stage={stage} setStage={setStage} result={result} />
-          {stage === 'observe' ? <ObserveStage result={result} isAnalyst={isAnalyst} /> : null}
-          {stage === 'investigate' ? <InvestigateStage result={result} isAnalyst={isAnalyst} /> : null}
-          {stage === 'contest' ? <ContestStage result={result} isAnalyst={isAnalyst} /> : null}
-          {stage === 'act' ? <ActStage result={result} isAnalyst={isAnalyst} /> : null}
+          <AnswerCard result={result} />
+          <EvidenceTrail evidence={result.evidence} />
           {result.telemetry ? <TelemetryResult telemetry={result.telemetry} /> : null}
           <EngineFooter engine={result.engine} />
         </>
       ) : null}
     </div>
+  )
+}
+
+function AnswerCard({ result }) {
+  const banner = STATUS_BANNER[result.status]
+  const kpis = result.kpis_used || []
+  const periods = result.periods_used || []
+  return (
+    <div className="space-y-3">
+      {banner ? (
+        <div
+          className="rounded-lg border-l-4 px-3 py-2.5 text-sm"
+          style={{
+            borderColor: banner.tone === 'critical' ? 'var(--status-critical)' : 'var(--status-warning)',
+            background: 'var(--plane)',
+          }}
+        >
+          <div className="font-semibold text-ink">{banner.label}</div>
+          <div className="text-ink-secondary">{banner.detail}</div>
+        </div>
+      ) : null}
+
+      <div className="card card-pad">
+        <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Answer</div>
+        {result.answer ? (
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-ink-secondary">{result.answer}</p>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">No answer was produced.</p>
+        )}
+
+        {kpis.length || periods.length ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {kpis.map((k) => (
+              <Badge key={k} tone="neutral">
+                {k}
+              </Badge>
+            ))}
+            {periods.map((p, i) => (
+              <Badge key={i} tone="neutral">
+                {typeof p === 'string' ? p : JSON.stringify(p)}
+              </Badge>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+/** How the answer was reached — collapsed by default, everyone can open it. */
+function EvidenceTrail({ evidence = [] }) {
+  if (!evidence.length) return null
+  return (
+    <details className="card card-pad">
+      <summary className="flex cursor-pointer select-none items-center gap-2 text-sm font-semibold text-ink">
+        <Wrench className="h-4 w-4 text-ink-muted" aria-hidden />
+        How I worked this out
+        <span className="tnum text-xs font-normal text-ink-muted">
+          ({evidence.length} tool {evidence.length === 1 ? 'call' : 'calls'})
+        </span>
+      </summary>
+      <ol className="mt-3 space-y-2">
+        {evidence.map((step) => (
+          <li key={step.step} className="rounded-lg border" style={{ borderColor: 'var(--border)' }}>
+            <details>
+              <summary
+                className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-sm"
+                style={{ color: step.is_error ? 'var(--status-critical)' : 'var(--text-primary)' }}
+              >
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden />
+                <span className="tnum text-ink-muted">{step.step}.</span>
+                <code className="font-medium">{step.tool}</code>
+                {step.is_error ? <Badge tone="critical">error</Badge> : null}
+              </summary>
+              <div className="space-y-2 border-t px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+                {step.args && Object.keys(step.args).length ? (
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Arguments</div>
+                    <pre className="mt-1 overflow-x-auto rounded-md p-2 text-xs" style={{ background: 'var(--plane)' }}>
+                      {JSON.stringify(step.args, null, 2)}
+                    </pre>
+                  </div>
+                ) : null}
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Result</div>
+                  <pre className="mt-1 overflow-x-auto rounded-md p-2 text-xs" style={{ background: 'var(--plane)' }}>
+                    {JSON.stringify(step.result, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            </details>
+          </li>
+        ))}
+      </ol>
+    </details>
   )
 }
 
@@ -211,338 +311,6 @@ function formatTelemetryTime(value) {
   return value ? new Date(value).toLocaleTimeString() : 'not recorded'
 }
 
-function StageNav({ stage, setStage, result }) {
-  const counts = {
-    observe: result.observe?.top_drivers?.length || 0,
-    investigate: result.investigate?.hypotheses?.length || 0,
-    contest: result.contest?.ranking?.length || 0,
-    act: result.act?.recommendations?.length || 0,
-  }
-  return (
-    <nav className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4" aria-label="Investigation stages">
-      {STAGES.map((s, i) => {
-        const active = stage === s.key
-        return (
-          <button
-            key={s.key}
-            type="button"
-            onClick={() => setStage(s.key)}
-            aria-current={active ? 'step' : undefined}
-            className="card card-pad text-left transition-shadow hover:shadow-sm"
-            style={active ? { outline: '2px solid var(--series-1)', outlineOffset: '-1px' } : undefined}
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Stage {i + 1}</span>
-              <span className="tnum text-[11px] text-ink-muted">{counts[s.key]}</span>
-            </div>
-            <div className="mt-1 text-sm font-semibold text-ink">{s.title}</div>
-            <div className="text-xs text-ink-secondary">{s.question}</div>
-          </button>
-        )
-      })}
-    </nav>
-  )
-}
-
-function ObserveStage({ result, isAnalyst }) {
-  const obs = result.observe
-  const verdict = VERDICT_COPY[obs.verdict] || VERDICT_COPY.within_normal_variation
-  return (
-    <div className="space-y-4">
-      <div className="card card-pad">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="text-xs uppercase tracking-wider text-ink-muted">
-              {obs.kpi_label} · {obs.timeframe.pretty} vs {obs.baseline_timeframe.pretty}
-            </div>
-            <div className="mt-1 flex items-baseline gap-3">
-              <span className="tnum text-3xl font-semibold text-ink">
-                {formatValue(obs.current_value, obs.unit, { compact: true })}
-              </span>
-              <span
-                className="tnum text-lg font-semibold"
-                style={{ color: obs.is_unfavourable ? 'var(--delta-bad)' : 'var(--delta-good)' }}
-              >
-                {formatDelta(obs.change_pct)}
-              </span>
-            </div>
-          </div>
-          <Badge tone={verdict.tone}>{verdict.label}</Badge>
-        </div>
-        <p className="mt-2 text-sm text-ink-secondary">{verdict.blurb}</p>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="card card-pad">
-          <TrendChart observation={obs} />
-        </div>
-        <div className="card card-pad">
-          <SectionTitle title="Drivers of the change" description="Members that moved the KPI more than their own size implies are the real drivers." />
-          <ul className="space-y-2">
-            {obs.top_drivers?.map((d) => (
-              <li key={`${d.dimension}-${d.name}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2" style={{ borderColor: 'var(--border)' }}>
-                <div>
-                  <div className="text-sm font-medium text-ink">{d.name}</div>
-                  <div className="text-xs text-ink-muted">{titleCase(d.dimension)}</div>
-                </div>
-                <div className="flex items-center gap-3">
-                  {d.is_disproportionate ? <Badge tone="critical">{d.over_index?.toFixed(1)}×</Badge> : null}
-                  <span className="tnum text-sm font-semibold text-ink">{d.contribution_pct?.toFixed(0)}%</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      {isAnalyst && obs.drivers ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {Object.entries(obs.drivers).map(([dimension, rows]) => (
-            <div key={dimension} className="card card-pad">
-              <DriverChart dimension={titleCase(dimension)} rows={rows} unit={obs.unit} higherIsBetter={obs.higher_is_better} />
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function InvestigateStage({ result, isAnalyst }) {
-  const inv = result.investigate
-  return (
-    <div className="space-y-4">
-      <Callout tone="info" title="How these were produced">
-        {inv.method_note}
-      </Callout>
-
-      <div className="flex flex-wrap gap-2">
-        <Badge tone="neutral">{inv.hypotheses.length} competing explanations</Badge>
-        {inv.considered_count ? <Badge tone="neutral">{inv.considered_count} considered</Badge> : null}
-        <Badge tone="neutral">{inv.documents_indexed} document chunks indexed</Badge>
-        <Badge tone={inv.llm_used ? 'good' : 'warning'}>
-          {inv.llm_used ? 'LLM framing enabled' : 'Deterministic framing'}
-        </Badge>
-        {Object.entries(inv.focus || {}).map(([dim, member]) => (
-          <Badge key={dim} tone="critical">
-            Focus: {member} ({dim})
-          </Badge>
-        ))}
-      </div>
-
-      {!inv.rag_available ? (
-        <Callout tone="warning" title="No documents uploaded">
-          Hypotheses are currently tested against structured data only. Upload operations reports, customer feedback or
-          market notes on the Documents page so the system can corroborate — or contradict — them with written evidence.
-        </Callout>
-      ) : null}
-
-      <div className="space-y-3">
-        {inv.hypotheses.map((h, i) => (
-          <article key={h.key} className="card card-pad">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-semibold text-ink sm:text-base">
-                {i + 1}. {h.title}
-              </h3>
-              <Badge tone="neutral">{titleCase(h.family)}</Badge>
-            </div>
-            <p className="mt-1 text-sm text-ink-secondary">{h.statement}</p>
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <Stat label="Structured tests" value={h.evidence?.length || 0} />
-              <Stat label="Document passages" value={h.documentary_evidence?.length || 0} />
-              <Stat label="Known gaps" value={h.missing?.length || 0} />
-            </div>
-            {h.documentary_evidence?.length ? (
-              <div className="mt-3 space-y-1.5">
-                {h.documentary_evidence.slice(0, 1).map((d) => (
-                  <p key={d.chunk_id} className="flex gap-2 text-xs italic text-ink-secondary">
-                    <Quote className="mt-0.5 h-3 w-3 shrink-0 text-ink-muted" aria-hidden />
-                    “{d.quote}” — {d.source}
-                  </p>
-                ))}
-              </div>
-            ) : null}
-          </article>
-        ))}
-      </div>
-
-      <AnalystOnly show={isAnalyst} title="Explanations considered but not carried forward">
-        <ul className="space-y-1 text-sm text-ink-secondary">
-          {(inv.not_carried_forward || []).map((r) => (
-            <li key={r.key}>
-              <span className="font-medium text-ink">{r.title}</span> — {r.reason}
-            </li>
-          ))}
-          {!inv.not_carried_forward?.length ? <li>Every applicable explanation was carried forward.</li> : null}
-        </ul>
-      </AnalystOnly>
-    </div>
-  )
-}
-
-function ContestStage({ result, isAnalyst }) {
-  const contest = result.contest
-  return (
-    <div className="space-y-4">
-      <div className="card card-pad">
-        <SectionTitle
-          title="Ranked by evidence, after being challenged"
-          description="Each explanation was tested for timing, consistency across the business, counterexamples and contradictory documents."
-        />
-        <ol className="space-y-2">
-          {contest.ranking.map((r) => (
-            <li key={r.key} className="flex items-center gap-3">
-              <span className="tnum w-5 text-sm text-ink-muted">{r.rank}</span>
-              <span className="min-w-0 flex-1 truncate text-sm text-ink">{r.title}</span>
-              <span className="tnum text-sm font-semibold text-ink">{r.confidence}%</span>
-              <span className="w-28 text-xs text-ink-muted">{titleCase(r.band)}</span>
-            </li>
-          ))}
-        </ol>
-        <p className="mt-3 text-xs text-ink-muted">{contest.confidence_disclaimer}</p>
-      </div>
-
-      {contest.ambiguity_note ? (
-        <Callout tone="warning" title="The evidence does not settle this">
-          {contest.ambiguity_note}
-        </Callout>
-      ) : null}
-
-      {contest.clarification_request ? (
-        <Callout tone="warning" title="Clarification required">
-          <p>{contest.clarification_request.reason}</p>
-          <ul className="mt-2 space-y-1">
-            {contest.clarification_request.questions.map((question, i) => <li key={i}>· {question}</li>)}
-          </ul>
-        </Callout>
-      ) : null}
-
-      <div className="space-y-3">
-        {contest.hypotheses.map((h, i) => (
-          <HypothesisCard key={h.key} hypothesis={h} rank={i + 1} isAnalyst={isAnalyst} defaultOpen={i === 0} />
-        ))}
-      </div>
-
-      {contest.unresolved_questions?.length ? (
-        <div className="card card-pad">
-          <SectionTitle title="What we still do not know" description="Gaps that would most change the conclusion if filled." />
-          <ul className="space-y-1.5 text-sm text-ink-secondary">
-            {contest.unresolved_questions.map((q, i) => (
-              <li key={i}>· {q}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function ActStage({ result }) {
-  const act = result.act
-  const n = act.narrative
-  const story = act.llm_story && !act.llm_story.error ? act.llm_story : null
-  // The reader's own framing. The evidence and ranking behind it are identical
-  // for every persona; what changes is the emphasis and what is advised.
-  const view = act.persona_view
-
-  return (
-    <div className="space-y-4">
-      {view ? (
-        <div className="card card-pad">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
-              Written for you
-            </div>
-            <Badge tone="info">{view.persona_label}</Badge>
-          </div>
-          <p className="mt-2 text-sm text-ink-secondary">{view.summary}</p>
-
-          {view.recommendations?.length ? (
-            <ul className="mt-4 space-y-3">
-              {view.recommendations.map((r, i) => (
-                <li key={i} className="border-l-2 border-sky-500/50 pl-3">
-                  <p className="text-sm font-medium text-ink">{r.action}</p>
-                  <p className="mt-0.5 text-xs text-ink-muted">{r.why}</p>
-                  <p className="mt-1 text-xs text-ink-muted">
-                    {r.owner ? <span>{r.owner}</span> : null}
-                    {r.timeframe ? <span> · {r.timeframe}</span> : null}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {view.question_to_ask ? (
-            <p className="mt-4 text-xs italic text-ink-muted">
-              Worth asking: {view.question_to_ask}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      <div className="card card-pad">
-        <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Executive summary</div>
-        <h3 className="mt-1 text-lg font-semibold text-ink">{n.headline}</h3>
-        {story ? (
-          <p className="mt-2 text-sm text-ink-secondary">{story.executive_summary}</p>
-        ) : (
-          <div className="mt-2 space-y-2 text-sm text-ink-secondary">
-            <p>{n.what_changed}</p>
-            <p>{n.how_significant}</p>
-            <p>{n.what_drove_it}</p>
-            <p>{n.leading_explanation}</p>
-          </div>
-        )}
-
-        {story ? (
-          <dl className="mt-4 grid gap-4 sm:grid-cols-2">
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-muted">What changed</dt>
-              <dd className="mt-1 text-sm text-ink-secondary">{story.what_changed}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-muted">Why it likely happened</dt>
-              <dd className="mt-1 text-sm text-ink-secondary">{story.why_it_likely_happened}</dd>
-            </div>
-          </dl>
-        ) : null}
-      </div>
-
-      {(story?.what_we_cannot_yet_say || n.what_we_are_not_sure_about?.length) ? (
-        <Callout tone="warning" title="What we cannot yet say">
-          {story?.what_we_cannot_yet_say ? (
-            <p>{story.what_we_cannot_yet_say}</p>
-          ) : (
-            <ul className="mt-1 space-y-1">
-              {n.what_we_are_not_sure_about.map((u, i) => (
-                <li key={i}>· {u}</li>
-              ))}
-            </ul>
-          )}
-        </Callout>
-      ) : null}
-
-      {act.clarification_request ? (
-        <Callout tone="warning" title="Clarification required">
-          <p>{act.clarification_request.reason}</p>
-          <ul className="mt-2 space-y-1">
-            {act.clarification_request.questions.map((question, i) => <li key={i}>· {question}</li>)}
-          </ul>
-        </Callout>
-      ) : null}
-
-      <SectionTitle title="Recommended next steps" description="Each is tied to the evidence that justifies it, and states what would change it." />
-      <Recommendations recommendations={act.recommendations} limits={act.limits} />
-
-      {story?.question_to_ask_the_team ? (
-        <Callout tone="info" title="A question this analysis cannot answer">
-          {story.question_to_ask_the_team}
-        </Callout>
-      ) : null}
-    </div>
-  )
-}
-
 function Stat({ label, value }) {
   return (
     <div className="rounded-lg px-3 py-2" style={{ background: 'var(--plane)' }}>
@@ -556,9 +324,8 @@ function EngineFooter({ engine }) {
   if (!engine) return null
   return (
     <p className="text-xs text-ink-muted">
-      Pipeline: {engine.pipeline.join(' → ')} · completed in {engine.total_seconds}s ·{' '}
-      {engine.llm?.enabled ? `reasoning layer: ${engine.llm.model}` : 'reasoning layer: deterministic fallback'} ·
-      numbers computed by the structured analysis layer.
+      {engine.turns} tool-loop {engine.turns === 1 ? 'turn' : 'turns'} · completed in {engine.seconds}s ·
+      {' '}reasoning layer: {engine.model} · numbers computed by the structured analysis layer.
     </p>
   )
 }

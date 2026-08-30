@@ -33,13 +33,6 @@ export function deltaTone(change, higherIsBetter = true) {
   return good ? 'good' : 'bad'
 }
 
-export const CONFIDENCE_BANDS = {
-  strong: { label: 'Strong evidence', color: 'var(--status-good)' },
-  moderate: { label: 'Moderate evidence', color: 'var(--status-warning)' },
-  weak: { label: 'Weak evidence', color: 'var(--status-serious)' },
-  insufficient: { label: 'Insufficient evidence', color: 'var(--status-critical)' },
-}
-
 export const VERDICT_COPY = {
   newly_launched: {
     label: 'Newly launched',
@@ -67,13 +60,6 @@ export const VERDICT_COPY = {
     blurb: 'Statistically unusual, but too small to matter commercially.',
   },
 }
-
-export const STAGES = [
-  { key: 'observe', title: 'Observe', question: 'What actually changed?' },
-  { key: 'investigate', title: 'Investigate', question: 'What could explain it?' },
-  { key: 'contest', title: 'Contest', question: 'What would disprove it?' },
-  { key: 'act', title: 'Act', question: 'What should we do?' },
-]
 
 export function quarterLabel(year, quarter) {
   return quarter ? `Q${quarter} ${year}` : `FY ${year}`

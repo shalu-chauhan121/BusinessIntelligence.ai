@@ -55,8 +55,12 @@ class AskEndpointTestCase(unittest.TestCase):
         cls.client = TestClient(app)
         cls.analyst = cls._login("ask_analyst@example.com", "data_analyst")
         cls.leader = cls._login("ask_leader@example.com", "business_leader")
-        # Absolute path on purpose: `test_stage_endpoints.py` uses a relative
-        # one and only passes when the suite is run from `backend/`.
+        # The demo uid is server-generated, not derivable from the email --
+        # fetched once so tests that check `InvestigationRepository` directly
+        # can scope to the right row.
+        cls.analyst_uid = cls.client.get("/api/auth/me", headers=cls.analyst).json()["uid"]
+        # Absolute path on purpose: a relative one only passes when the suite
+        # is run from `backend/`.
         with open(SAMPLE_CSV, "rb") as f:
             cls.client.post("/api/datasets", headers=cls.analyst,
                             files={"file": ("retail.csv", f, "text/csv")})
@@ -120,7 +124,7 @@ class TestTheHappyPath(AskEndpointTestCase):
         self.assertEqual(
             set(body),
             {"status", "question", "answer", "evidence", "kpis_used", "periods_used",
-             "engine", "dataset", "view", "telemetry"})
+             "engine", "dataset", "view", "telemetry", "investigation_id"})
 
     def test_the_question_is_echoed_back_verbatim(self):
         self.script(self.one_query_then_answer())
@@ -288,18 +292,35 @@ class TestTelemetryAndPersistence(AskEndpointTestCase):
         self.assertEqual(body["telemetry"]["model_calls"], 2)
         self.assertEqual(body["telemetry"]["endpoint"], "/api/questions/ask")
 
-    def test_asking_a_question_writes_no_investigation_row(self):
-        before = len(InvestigationRepository().list_for_user("test_user"))
+    def test_asking_a_question_without_persist_writes_no_investigation_row(self):
+        before = len(InvestigationRepository().list_for_user(self.analyst_uid))
         self.script(self.one_query_then_answer())
-        self.ask("Does asking this save anything about 2025?")
-        after = len(InvestigationRepository().list_for_user("test_user"))
+        r = self.ask("Does asking this save anything about 2025?").json()
+        after = len(InvestigationRepository().list_for_user(self.analyst_uid))
         self.assertEqual(before, after)
+        self.assertIsNone(r["investigation_id"])
 
-    def test_a_persist_field_in_the_body_is_ignored_rather_than_honoured(self):
+    def test_a_persist_field_in_the_body_saves_the_answer(self):
         self.script(self.one_query_then_answer())
         r = self.ask("Can I force a save of this 2025 lookup?", persist=True)
         self.assertEqual(r.status_code, 200)
-        self.assertNotIn("investigation_id", r.json())
+        body = r.json()
+        self.assertIsNotNone(body["investigation_id"])
+
+        saved = InvestigationRepository().get(self.analyst_uid, body["investigation_id"])
+        self.assertEqual(saved["question"], "Can I force a save of this 2025 lookup?")
+        self.assertEqual(saved["answer"], body["answer"])
+        self.assertEqual(saved["result"], body)
+
+    def test_persist_on_a_non_ok_status_saves_nothing(self):
+        """A truncated or refused run has no durable answer worth keeping."""
+        self.script([scripted_message([text_block("Revenue was ")], "max_tokens")])
+        before = len(InvestigationRepository().list_for_user(self.analyst_uid))
+        r = self.ask("Force a save of a run that does not finish cleanly?", persist=True)
+        self.assertEqual(r.json()["status"], "truncated")
+        after = len(InvestigationRepository().list_for_user(self.analyst_uid))
+        self.assertEqual(before, after)
+        self.assertIsNone(r.json()["investigation_id"])
 
 
 class TestThePublishedContract(unittest.TestCase):
