@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import unittest
 
-from app.api.redact import redact_contest, redact_observation, redact_result
+from app.api.redact import redact_observation
 from app.auth.firebase_auth import AuthError, auth_mode, issue_demo_token, verify_token
 from app.db.repositories import DatasetRepository, UserRepository, get_store
 from app.engines.observe import Timeframe, observe
-from app.services import pipeline
 
 from .base import EngineTestCase
 
@@ -70,6 +69,13 @@ class TestRolesAndAuthorisation(EngineTestCase):
             users.set_role("role_user", "ceo")
 
     def test_analyst_sees_statistical_internals_and_leader_does_not(self):
+        """
+        The one redaction boundary that survives A9: `/api/dashboard` still
+        shapes its `observe` block by role. `/api/questions/ask`'s role parity
+        (both roles get the identical, unredacted evidence trail) is covered
+        in `test_ask_endpoint.py` instead -- that endpoint is deliberately not
+        redacted at all, so there is nothing here for it to test.
+        """
         observation = observe(self.df, self.schema, "revenue", Timeframe(2026, 2))
         analyst_view = redact_observation(observation, analyst=True)
         leader_view = redact_observation(observation, analyst=False)
@@ -85,22 +91,10 @@ class TestRolesAndAuthorisation(EngineTestCase):
         self.assertIn("explanation", leader_view["significance"])
         self.assertTrue(leader_view["top_drivers"])
 
-    def test_leader_does_not_receive_the_evidence_ledger(self):
-        result = pipeline.run_full(self.uid, self.dataset, "revenue", 2026, 2,
-                                   persist=False, use_llm=False)
-        leader = redact_contest(result["contest"], analyst=False)
-        analyst = redact_contest(result["contest"], analyst=True)
-        self.assertIn("score_ledger", analyst["hypotheses"][0]["scoring"])
-        self.assertNotIn("score_ledger", leader["hypotheses"][0]["scoring"])
-        # but the conclusion and the reasoning trail remain visible to both
-        self.assertTrue(leader["hypotheses"][0]["reasoning_trail"])
-        self.assertIn("confidence", leader["hypotheses"][0]["scoring"])
-
-    def test_redaction_does_not_mutate_the_source_result(self):
-        result = pipeline.run_full(self.uid, self.dataset, "revenue", 2026, 2,
-                                   persist=False, use_llm=False)
-        redact_result(result, {"role": "business_leader"})
-        self.assertIn("robust_z", result["observe"]["significance"])
+    def test_redaction_does_not_mutate_the_source_observation(self):
+        observation = observe(self.df, self.schema, "revenue", Timeframe(2026, 2))
+        redact_observation(observation, analyst=False)
+        self.assertIn("robust_z", observation["significance"])
 
 
 if __name__ == "__main__":

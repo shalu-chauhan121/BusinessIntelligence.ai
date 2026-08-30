@@ -19,8 +19,6 @@ ANALYST_ONLY_SIGNIFICANCE = [
     "historical_changes", "method", "statistical_power", "history_points", "same_quarter_points",
     "z_threshold", "material_threshold_pct",
 ]
-ANALYST_ONLY_SCORING = ["score_ledger", "support_score", "against_score", "missing_penalty"]
-
 # How a driver was RANKED is analyst detail: the score components, the member's
 # robust z against its own history, the Shapley axis weighting. A leader still
 # sees which drivers came out on top, their rank, and their contribution -- the
@@ -116,41 +114,10 @@ def _plain_significance(observation: Dict[str, Any]) -> str:
     return base
 
 
-def redact_investigation(investigation: Dict[str, Any], analyst: bool) -> Dict[str, Any]:
-    if analyst:
-        return investigation
-    out = copy.deepcopy(investigation)
-    out.pop("not_carried_forward", None)
-    out.pop("considered_count", None)
-    return out
-
-
-def redact_contest(contested: Dict[str, Any], analyst: bool) -> Dict[str, Any]:
-    if analyst:
-        return contested
-    out = copy.deepcopy(contested)
-    for h in out.get("hypotheses", []):
-        for key in ANALYST_ONLY_SCORING:
-            h.get("scoring", {}).pop(key, None)
-        contest_block = h.get("contest", {})
-        contest_block.pop("temporal_series", None)
-        consistency = contest_block.get("consistency", {})
-        consistency.pop("members", None)
-        corr = consistency.get("correlation")
-        if isinstance(corr, dict):
-            consistency["correlation"] = {"interpretation": corr.get("interpretation")}
-        for e in h.get("evidence", []):
-            e.pop("strength", None)
-            e.pop("weight", None)
-    return out
-
-
-def redact_result(result: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
-    analyst = is_analyst(user)
-    return {
-        **result,
-        "observe": redact_observation(result["observe"], analyst),
-        "investigate": redact_investigation(result["investigate"], analyst),
-        "contest": redact_contest(result["contest"], analyst),
-        "view": {"role": user.get("role"), "analyst_detail_included": analyst},
-    }
+#
+# `redact_investigation`, `redact_contest` and `redact_result` shaped the
+# retired 4-stage pipeline's `investigate`/`contest` blocks and its combined
+# result. They were retired at A9 along with that pipeline: `/questions/ask`
+# and the saved answers it produces are deliberately unredacted for every
+# role (see the endpoint's own docstring for why), so no replacement is
+# needed here.

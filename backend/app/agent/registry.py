@@ -48,6 +48,7 @@ from .relations import RelationGraph
 from .scan import ORDER_BY_CHOICES, ScanEngine
 from .seasonality import CYCLE_LENGTH, SeasonalityEngine
 from .segments import SegmentEngine
+from .sensitivity import SensitivityEngine
 from .series import SERIES_GRAINS, SeriesEngine
 from .significance import SignificanceEngine
 from .temporal import TemporalEngine
@@ -472,6 +473,16 @@ TOOL_SPECS: Tuple[ToolSpec, ...] = (
             "Whether there is enough data to conclude anything at all about "
             "a KPI's relationship to a dimension, before running a test "
             "that would otherwise report a number nobody should trust."),
+    ToolSpec("test_sensitivity_to_outliers", "contest", SensitivityEngine, "test_sensitivity_to_outliers",
+            "Whether a cross-sectional correlation survives dropping the "
+            "single member that most influences it -- 'is this finding just "
+            "one big account'. Reports the finding with that member removed "
+            "and whether it was also the biggest mover."),
+    ToolSpec("estimate_effect_size", "contest", SensitivityEngine, "estimate_effect_size",
+            "How large a KPI/cause association is and how wide its real "
+            "interval is: r, shared variance, and a bootstrap confidence "
+            "interval beside the parametric one. Call this when 'significant' "
+            "is not the same question as 'big enough to matter'."),
 )
 
 _SPECS_BY_NAME: Dict[str, ToolSpec] = {spec.name: spec for spec in TOOL_SPECS}

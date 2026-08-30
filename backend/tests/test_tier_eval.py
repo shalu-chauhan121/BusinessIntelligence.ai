@@ -358,7 +358,7 @@ class TestToolUsageReport(unittest.TestCase):
             {"tools": ["query_kpi", "scan_kpis"], "tools_ok": ["scan_kpis"]},
         ]
 
-    def test_the_report_accounts_for_all_fifty_six_tools_across_the_six_groups(self):
+    def test_the_report_accounts_for_every_registered_tool_across_the_groups(self):
         cover = va.coverage(self.runs)
         self.assertEqual(cover["tools_total"], len(TOOL_SPECS))
         self.assertEqual(cover["tools_fired"] + cover["tools_never_fired"], len(TOOL_SPECS))
@@ -372,12 +372,20 @@ class TestToolUsageReport(unittest.TestCase):
             self.assertEqual(block["fired"] + len(block["never_names"]), expected)
 
     def test_a_tool_that_never_fires_is_reported_but_does_not_fail_the_run(self):
-        """Seventeen questions cannot exercise 56 tools. `never_fired` is the
+        """Seventeen questions cannot exercise every tool. `never_fired` is the
         evidence the X5 and progressive-disclosure decisions rest on, and
         gating on it would only invite gaming."""
         cover = va.coverage(self.runs)
         self.assertIn("test_confounders", cover["never_fired"])
         self.assertNotIn("pass", cover)
+
+    def test_the_x5_sensitivity_tools_are_registered_in_the_contest_group(self):
+        """X5 (decision 68) shipped two tools; the report must account for them
+        like any other contest tool, so the gate can read their reach."""
+        contest = va.coverage(self.runs)["by_group"]["contest"]
+        names = set(contest["fired_names"]) | set(contest["never_names"])
+        self.assertIn("test_sensitivity_to_outliers", names)
+        self.assertIn("estimate_effect_size", names)
 
     def test_an_errored_call_still_counts_as_the_tool_having_fired(self):
         cover = va.coverage(self.runs)

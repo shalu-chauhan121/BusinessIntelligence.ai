@@ -1,12 +1,14 @@
 """
-Headless end-to-end run of the four-stage pipeline against the bundled sample
-data. No web server, no Firebase, no API key required.
+Headless end-to-end run of the agent loop against the bundled sample data.
+No web server, no Firebase required — but the loop has no deterministic
+fallback, so a live `ANTHROPIC_API_KEY` is required (unlike the retired
+4-stage demo this replaces).
 
-    python3 scripts/run_pipeline_demo.py [--kpi revenue] [--year 2026] [--quarter 2]
+    python3 scripts/run_pipeline_demo.py "What factors are affecting my profit?"
 
-Writes the full investigation JSON to `demo_output/investigation.json`.
-Useful for (a) verifying the analysis layer, (b) generating fixtures for the
-frontend, (c) demonstrating the pipeline in a terminal during a demo.
+Writes the full `AgentAnswer` JSON to `demo_output/agent_answer.json`. Useful
+for (a) verifying the agent loop end to end, (b) generating fixtures for the
+frontend, (c) demonstrating the loop in a terminal during a demo.
 """
 from __future__ import annotations
 
@@ -20,14 +22,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("DATA_DIR", str(ROOT / "backend" / "data"))
 
+from app.agent import loop                                          # noqa: E402
+from app.agent.context import AgentContext                          # noqa: E402
 from app.db.repositories import DocumentRepository, UserRepository  # noqa: E402
+from app.llm.client import get_llm                                  # noqa: E402
 from app.rag.chunker import chunk_document                          # noqa: E402
 from app.rag.extract import extract_text, guess_doc_type            # noqa: E402
 from app.rag.retriever import invalidate                            # noqa: E402
-from app.services import dataset_service, pipeline                  # noqa: E402
+from app.services import dataset_service                            # noqa: E402
 
 SAMPLE_CSV = ROOT / "sample_data" / "business_metrics_sample.csv"
 SAMPLE_DOCS = ROOT / "sample_data" / "documents"
+
+DEFAULT_QUESTION = "What is driving the change in revenue this quarter?"
 
 
 def seed(uid: str = "demo_cli_user") -> dict:
@@ -48,47 +55,37 @@ def seed(uid: str = "demo_cli_user") -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kpi", default="revenue")
-    ap.add_argument("--year", type=int, default=2026)
-    ap.add_argument("--quarter", type=int, default=2)
-    ap.add_argument("--comparison", default="previous_period",
-                    choices=["previous_period", "year_over_year"])
-    ap.add_argument("--out", default=str(ROOT / "demo_output" / "investigation.json"))
+    ap.add_argument("question", nargs="?", default=DEFAULT_QUESTION)
+    ap.add_argument("--out", default=str(ROOT / "demo_output" / "agent_answer.json"))
     args = ap.parse_args()
 
     uid = "demo_cli_user"
     ds = seed(uid)
-    result = pipeline.run_full(uid, ds, args.kpi, args.year, args.quarter,
-                               args.comparison, persist=True, use_llm=True)
+    ctx = AgentContext.build(uid, ds)
+    result = loop.answer(args.question, ctx, llm=get_llm())
 
+    payload = {
+        "status": result.status, "question": result.question, "answer": result.answer,
+        "evidence": result.evidence, "kpis_used": result.kpis_used,
+        "periods_used": result.periods_used, "engine": result.engine,
+    }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=2, default=str))
+    out.write_text(json.dumps(payload, indent=2, default=str))
 
-    obs, con, act = result["observe"], result["contest"], result["act"]
     line = "=" * 78
     print(line)
-    print(f"OBSERVE   {obs['kpi_label']} {obs['change_pct']:+.1f}%  "
-          f"({obs['timeframe']['pretty']} vs {obs['baseline_timeframe']['pretty']})")
-    print(f"          verdict: {obs['verdict']}   robust z = {obs['significance']['robust_z']:.2f} "
-          f"[{obs['significance']['method']}]")
-    print("          top drivers: " + ", ".join(
-        f"{d['name']} ({d['dimension']}) {d['contribution_pct']:.0f}%" for d in obs["top_drivers"][:4]))
+    print(f"QUESTION  {result.question}")
+    print(f"STATUS    {result.status}   turns: {result.engine.get('turns')}   "
+          f"model: {result.engine.get('model')}   {result.engine.get('seconds')}s")
     print(line)
-    print(f"INVESTIGATE  {len(result['investigate']['hypotheses'])} competing hypotheses "
-          f"from {result['investigate']['considered_count']} considered; "
-          f"{result['investigate']['documents_indexed']} document chunks indexed")
+    print(f"ANSWER\n{result.answer}")
     print(line)
-    print("CONTEST   ranking:")
-    for r in con["ranking"]:
-        print(f"   {r['rank']}. {r['title']:<52} {r['confidence']:>3}%  {r['band']}")
-    if con.get("ambiguity_note"):
-        print(f"   ! {con['ambiguity_note']}")
-    print(line)
-    print("ACT")
-    print(f"   {act['narrative']['headline']}")
-    for r in act["recommendations"]:
-        print(f"   [{r['priority']}] {r['title']}  (from: {r['based_on']['hypothesis']})")
+    print(f"KPIs used: {', '.join(result.kpis_used) or '(none)'}")
+    print(f"Evidence steps: {len(result.evidence)}")
+    for step in result.evidence:
+        flag = "  [error]" if step.get("is_error") else ""
+        print(f"   {step['step']}. {step['tool']}({step.get('args') or {}}){flag}")
     print(line)
     print(f"written: {out}")
 

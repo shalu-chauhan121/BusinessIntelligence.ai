@@ -132,6 +132,10 @@ class RetailRegistryTestCase(EngineTestCase):
             "test_statistical_significance": {"kpi_key": cls.kpi, "cause_kpi": cls.ratio_kpi,
                                              "period_a": cls.tf_year, "period_b": cls.tf_year2},
             "check_sample_adequacy": {"kpi_key": cls.kpi, "dimension": cls.dim},
+            "test_sensitivity_to_outliers": {"kpi_key": cls.kpi, "cause_kpi": cls.ratio_kpi,
+                                            "period_a": cls.tf_year, "period_b": cls.tf_year2},
+            "estimate_effect_size": {"kpi_key": cls.kpi, "cause_kpi": cls.ratio_kpi,
+                                     "period_a": cls.tf_year, "period_b": cls.tf_year2},
         }
 
 

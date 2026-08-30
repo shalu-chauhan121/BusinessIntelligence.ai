@@ -167,16 +167,15 @@ export const api = {
   },
   telemetrySummary: () => request('/api/telemetry/summary'),
   telemetryRecent: () => request('/api/telemetry/recent'),
-  runInvestigation: (payload, signal) =>
-    request('/api/investigations/run', { method: 'POST', body: payload, signal }),
 
-  // question-driven investigation
+  // question interpretation (reads the question against the KPI contract; runs nothing)
   interpretQuestion: (question, signal) =>
     request('/api/questions/interpret', { method: 'POST', body: { question }, signal }),
-  // Resolves to either a full result or { status: 'needs_clarification', ... } —
-  // an unresolvable question is a normal branch, not an error.
-  askQuestion: (payload, signal) =>
-    request('/api/questions/investigate', { method: 'POST', body: payload, signal }),
+  // The agent loop. Always resolves to an `AgentAnswerResponse` — check
+  // `status` ('ok' | 'max_turns_exhausted' | 'truncated' | 'refused' |
+  // 'llm_required') before reading `answer`; none of those are HTTP errors.
+  askAgent: (payload, signal) =>
+    request('/api/questions/ask', { method: 'POST', body: payload, signal }),
 
   listInvestigations: () => request('/api/investigations'),
   getInvestigation: (id) => request(`/api/investigations/${id}`),

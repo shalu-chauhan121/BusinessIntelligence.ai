@@ -500,3 +500,41 @@ def observe(df: pd.DataFrame, schema: DatasetSchema, metric: str, tf: Timeframe,
         "baseline_rows": int(len(base)),
         "data_warnings": schema.warnings,
     }
+
+
+MIN_FOCUS_CONTRIBUTION_PCT = 25.0
+MIN_FOCUS_OVER_INDEX = 1.2
+
+
+def determine_focus(observation: Dict[str, Any]) -> Dict[str, str]:
+    """
+    The dimension members genuinely responsible for the change.
+
+    A member only qualifies if it both (a) accounts for a large share of the
+    change and (b) over-contributes relative to its own size. Without the second
+    test the "driver" of any decline is simply whichever segment is biggest,
+    which tells a business nothing.
+
+    Moved here from the retired `engines/investigate.py` at A9 — this is the
+    one piece of that module `scripts/validate_rca.py`'s temporal-ordering
+    check still depends on (it scopes the onset comparison to the focus the
+    engine itself selected), so it survives the deletion of the stage it used
+    to feed.
+    """
+    scored = []
+    for dim, rows in (observation.get("drivers") or {}).items():
+        for r in rows:
+            if r.get("is_aggregate"):
+                continue
+            contribution, over_index = r.get("contribution_pct"), r.get("over_index")
+            if contribution is None or contribution < MIN_FOCUS_CONTRIBUTION_PCT:
+                continue
+            if over_index is not None and over_index < MIN_FOCUS_OVER_INDEX:
+                continue
+            scored.append((over_index or 1.0, contribution, dim, r["name"]))
+    scored.sort(reverse=True)
+
+    focus: Dict[str, str] = {}
+    for _, _, dim, name in scored:
+        focus.setdefault(dim, name)
+    return dict(list(focus.items())[:2])       # at most two dimensions keeps slices meaningful

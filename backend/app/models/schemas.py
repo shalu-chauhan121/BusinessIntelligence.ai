@@ -48,40 +48,18 @@ class UserOut(BaseModel):
 
 class QuestionRequest(BaseModel):
     """
-    A business question, in the user's own words.
+    A business question, in the user's own words, for `/api/questions/interpret`.
 
-    Replaces KPI selection as the way an investigation starts. Which KPI, which
-    period and which comparison are resolved from the question against the
-    dataset's KPI contract rather than chosen from a dropdown.
+    Reading a question (which KPI, which period) is the only thing this model
+    still serves after A9 retired the 4-stage pipeline it used to kick off —
+    `persona` and `persist` went with that pipeline, since interpretation alone
+    neither frames an answer nor produces anything to save.
     """
 
     question: str = Field(min_length=1, max_length=500,
                           description="e.g. 'Why did profit fall in Q4 even though revenue held?'")
     dataset_id: Optional[str] = None
-    persona: Optional[Persona] = Field(
-        default=None,
-        description="Overrides the user's stored persona for this run. Presentation only.")
     use_llm: bool = True
-    persist: bool = True
-
-
-class AnalysisRequest(BaseModel):
-    kpi: Optional[str] = Field(default=None, description="KPI key, e.g. 'revenue'. Defaults to revenue.")
-    year: Optional[int] = Field(default=None, description="Analysis year. Defaults to the latest in the data.")
-    quarter: Optional[int] = Field(default=None, ge=1, le=4,
-                                   description="1-4, or null for the full year.")
-    comparison: Comparison = "previous_period"
-    # A per-stage caller may target the KPI directly (above) OR ask a business
-    # question and let the stage resolve its own KPI/period from the contract,
-    # the same way `/api/questions/investigate` does. When both are supplied,
-    # the question wins — it is the more specific instruction.
-    question: Optional[str] = Field(
-        default=None, max_length=500,
-        description="Resolve the KPI/period from a question instead of the fields above.")
-    persona: Optional[Persona] = None
-    dataset_id: Optional[str] = None
-    use_llm: bool = True
-    persist: bool = True
 
 
 class SearchRequest(BaseModel):
@@ -106,13 +84,16 @@ class AgentQuestionRequest(BaseModel):
     """
     A business question for the agent loop.
 
-    Deliberately narrower than `QuestionRequest`. It has no `persist` (nothing
-    is saved — an `AgentAnswer` has no kpi/verdict/hypothesis, which is what an
-    investigation row is shaped around), no `use_llm` (the loop has no
-    deterministic fallback by design, so `False` would only mean "return
-    `llm_required` on purpose"), and no `persona` (`prompts.agent_system` takes
-    a seed dict and has no persona seam — a field the server accepted and then
-    ignored would be worse than an absent one).
+    Deliberately narrower than the old `QuestionRequest`. It has no `use_llm`
+    (the loop has no deterministic fallback by design, so `False` would only
+    mean "return `llm_required` on purpose") and no `persona`
+    (`prompts.agent_system` takes a seed dict and has no persona seam — a field
+    the server accepted and then ignored would be worse than an absent one).
+
+    `persist`, unlike those two, is a legitimate lever: `InvestigationRepository`
+    is a generic `{**payload}` store, so an `AgentAnswer` (question/answer/
+    evidence/kpis_used/periods_used/engine) persists exactly as it is, with no
+    kpi/verdict/hypothesis shape imposed on it.
 
     `max_turns` is deliberately not exposed either: it is a cost lever a client
     should not hold, and `settings.llm_max_turns` already governs it.
@@ -121,6 +102,7 @@ class AgentQuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500,
                           description="e.g. 'What should I be worried about right now?'")
     dataset_id: Optional[str] = None
+    persist: bool = False
 
 
 class AgentEvidenceStep(BaseModel):
@@ -147,6 +129,9 @@ class AgentAnswerResponse(BaseModel):
     engine: Dict[str, Any] = Field(default_factory=dict)
     dataset: Dict[str, Any] = Field(default_factory=dict)
     view: Dict[str, Any] = Field(default_factory=dict)
+    # Set only when the request asked to persist and the answer was saved —
+    # the id `GET /api/investigations/{id}` and `DELETE` take.
+    investigation_id: Optional[str] = None
     telemetry: Optional[Dict[str, Any]] = None
 
 

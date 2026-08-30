@@ -5,16 +5,17 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.api.routes_analysis import run_investigation, telemetry_summary
+from app.agent.context import AgentContext
+from app.api.routes_analysis import ask_question, telemetry_summary
 from app.db.repositories import TelemetryRepository
-from app.llm.client import LLMClient
-from app.models.schemas import AnalysisRequest
-from app.services import pipeline
+from app.llm.client import LLMClient, get_llm
+from app.models.schemas import AgentQuestionRequest
 from app.services.telemetry import (
     TelemetrySession, estimate_tokens, request_telemetry, track_llm_call, track_processing_step,
 )
 
 from .base import EngineTestCase
+from .fakes import ScriptedAnthropic, scripted_message, text_block, tool_use_block
 
 
 class TestRuntimeTelemetry(EngineTestCase):
@@ -58,14 +59,19 @@ class TestRuntimeTelemetry(EngineTestCase):
         self.assertEqual(saved["processing"]["llm"]["step_count"], 1)
         self.assertEqual(saved["processing"]["non_llm"]["step_count"], 2)
 
-    def test_full_workflow_records_each_non_llm_stage(self):
+    def test_agent_context_build_records_its_one_non_llm_stage(self):
+        """
+        `AgentContext.build` -- loading the dataset, compiling the contract
+        facade, building the tool registry -- is the only non-LLM processing
+        step the agent loop's endpoint records; everything past it is an LLM
+        turn. Replaces the retired pipeline's five-stage assertion.
+        """
         with request_telemetry(self.uid, "/test") as session:
-            pipeline.run_full(self.uid, self.dataset, "revenue", 2026, 2,
-                              persist=False, use_llm=False)
+            with track_processing_step("Build agent context", "Non-LLM Processing"):
+                AgentContext.build(self.uid, self.dataset)
         self.assertEqual([step["name"] for step in session.saved["steps"]],
-                         ["Load dataset", "Observe", "Investigate", "Contest", "Act"])
-        self.assertTrue(all(step["processing_type"] == "Non-LLM Processing"
-                            for step in session.saved["steps"]))
+                         ["Build agent context"])
+        self.assertEqual(session.saved["steps"][0]["processing_type"], "Non-LLM Processing")
 
     def test_llm_client_call_records_the_real_wrapper_path(self):
         client = LLMClient()
@@ -114,14 +120,27 @@ class TestRuntimeTelemetry(EngineTestCase):
         self.assertTrue(changed_context.saved["cache_miss"])
         self.assertTrue(changed_model.saved["cache_miss"])
 
-    def test_run_endpoint_returns_runtime_telemetry(self):
-        response = run_investigation(
-            AnalysisRequest(kpi="revenue", year=2026, quarter=2, persist=False, use_llm=False),
-            {"uid": self.uid, "role": "data_analyst"},
-        )
+    def test_ask_endpoint_returns_runtime_telemetry(self):
+        llm = get_llm()
+        llm._client = ScriptedAnthropic([
+            scripted_message([tool_use_block("t1", "query_kpi",
+                                             {"kpi_keys": "revenue",
+                                              "time_filter": {"type": "year", "year": 2026}})],
+                             "tool_use"),
+            scripted_message([text_block("Revenue was steady.")], "end_turn"),
+        ])
+        llm._cache.clear()
+        try:
+            response = ask_question(
+                AgentQuestionRequest(question="What was revenue in 2026?"),
+                {"uid": self.uid, "role": "data_analyst"},
+            )
+        finally:
+            llm._client = None
+            llm._cache.clear()
         self.assertIn("telemetry", response)
-        self.assertEqual(response["telemetry"]["endpoint"], "/api/investigations/run")
-        self.assertEqual(response["telemetry"]["processing"]["non_llm"]["step_count"], 5)
+        self.assertEqual(response["telemetry"]["endpoint"], "/api/questions/ask")
+        self.assertEqual(response["telemetry"]["processing"]["non_llm"]["step_count"], 1)
 
     def test_missing_usage_uses_explicit_lightweight_fallback(self):
         self.assertEqual(estimate_tokens("abcd"), 1)

@@ -1,13 +1,12 @@
 # Convenience targets. Everything here is a plain command you can also run by hand.
-.PHONY: help setup backend frontend test demo preview validate validate-agent clean
+.PHONY: help setup backend frontend test demo validate validate-agent clean
 
 help:
 	@echo "make setup          install backend and frontend dependencies"
 	@echo "make backend        run the API on :8000"
 	@echo "make frontend       run the UI on :5173"
 	@echo "make test           run the backend test suite"
-	@echo "make demo           run the four-stage pipeline headless and print the result"
-	@echo "make preview        rebuild docs/ui-preview.html from the latest demo run"
+	@echo "make demo           run the agent loop headless and print the result (needs a key)"
 	@echo "make validate       score root-cause analysis against the planted ground truth"
 	@echo "make validate-agent score the agent loop against the question taxonomy (needs a key)"
 	@echo "make clean          remove local data, caches and generated output"
@@ -27,14 +26,15 @@ frontend:
 test:
 	cd backend && python3 -m unittest discover -s tests -t .
 
+# NOT a CI gate: the agent loop has no deterministic fallback, so this needs a
+# live ANTHROPIC_API_KEY.
 demo:
 	python3 scripts/run_pipeline_demo.py
 
-preview: demo
-	python3 scripts/build_ui_preview.py
-
 # Deterministic and keyless -- safe in CI, and asserted check-by-check by
-# backend/tests/test_rca_ground_truth.py.
+# backend/tests/test_rca_ground_truth.py. Scores `observe` (and the driver
+# ranking it feeds) directly since A9 retired the 4-stage pipeline this used
+# to run end to end through.
 validate:
 	python3 scripts/validate_rca.py
 

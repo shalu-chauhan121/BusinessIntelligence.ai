@@ -21,7 +21,6 @@ PERMISSIONS = {
         "run_investigation": True,
         "view_statistical_detail": True,   # z-scores, MAD, correlations, method notes
         "view_evidence_ledger": True,      # how each confidence score was built
-        "view_reasoning_trail": True,
         "view_raw_driver_tables": True,
         "search_documents": True,
         "manage_data": True,
@@ -33,7 +32,6 @@ PERMISSIONS = {
         "run_investigation": True,
         "view_statistical_detail": False,
         "view_evidence_ledger": False,
-        "view_reasoning_trail": True,
         "view_raw_driver_tables": False,
         "search_documents": False,
         "manage_data": True,

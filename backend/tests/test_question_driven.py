@@ -1,12 +1,12 @@
 """
-The question-driven investigation: grounding, driver derivation, signal
-filtering, and the guarantees that keep the language model honest.
+Question grounding, driver-graph derivation, and dimension-member binding.
 
-The acceptance test in `TestDomainAwareness` is the one that matters most. The
-system used to answer a question about a hospital by proposing that a competitor
-had taken volume — a sentence hardcoded into a retail template that fired on any
-dataset with a dimension column. That must now be impossible, not merely
-unlikely, and the test asserts it directly.
+`TestDomainAwareness`, `TestMaterialSignals`, `TestLlmHypothesisContract`,
+`TestDeterminism` and `TestPersonaReframing` were retired at A9 along with
+`engines/{hypotheses,investigate,llm_hypotheses,signals}.py` and
+`personas/reframe.py`, the modules they exercised. What remains here —
+`interpret_question`/`ground_question` (`query/`) and the driver graph
+(`engines/driver_graph.py`) — is independent of that retired pipeline.
 """
 from __future__ import annotations
 
@@ -17,11 +17,7 @@ import pandas as pd
 
 from app.engines import metrics, observe
 from app.engines.driver_graph import (attach_proposed_edges, build_driver_graph,
-                                      period_change_table, verify_edge)
-from app.engines.hypotheses import Context
-from app.engines.investigate import determine_focus, investigate
-from app.engines.llm_hypotheses import build_llm_candidates, category_summary, shortlist
-from app.engines.signals import material_signals
+                                      period_change_table)
 from app.kpi import service as kpi_service
 from app.kpi.domain import domain_context_from_contract
 from app.models.investigation import DriverEdge
@@ -31,11 +27,6 @@ from app.query.periods import resolve_period
 from app.query.understanding import interpret_question
 
 HOSPITAL_CSV = "../sample_data/hospital_kpi_smoke_sample.csv"
-
-# Vocabulary that only belongs to a retail explanation. If any of it reaches a
-# hospital investigation, a template has leaked back in.
-RETAIL_LEAKAGE = ("competitor", "competitive pressure", "discount", "stockout",
-                  "assortment", "shopper", "basket", "merchandis")
 
 
 def _hospital_dataset():
@@ -53,58 +44,10 @@ def _hospital_dataset():
     return df, schema, contract
 
 
-def _context(df, schema, metric):
-    tfs = observe.available_timeframes(df)
-    tf = observe.Timeframe(tfs[-1]["year"], tfs[-1]["quarter"])
-    obs = observe.observe(df, schema, metric, tf, "previous_period")
-    ctx = Context(df=df, schema=schema, metric=metric,
-                  cur=observe.slice_period(df, tf),
-                  base=observe.slice_period(df, tf.previous()),
-                  observation=obs, focus=determine_focus(obs))
-    return ctx, obs
-
-
 class HospitalTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.df, cls.schema, cls.contract = _hospital_dataset()
-
-
-# ---------------------------------------------------------------------------
-class TestDomainAwareness(HospitalTestCase):
-    def test_the_domain_is_reachable_at_analysis_time(self):
-        """Detection happens at discovery; the engines need it much later."""
-        self.assertEqual(self.schema.domain_key, "healthcare")
-        self.assertIn("hospital", self.schema.domain.vocab.label)
-        self.assertIn("beds", self.schema.domain.vocab.capacity_note)
-
-    def test_a_hospital_investigation_never_blames_a_competitor(self):
-        """
-        The acceptance test for this whole change.
-
-        Every hypothesis must be derived from what this dataset measures. There
-        is no competitor-price column in a hospital admissions export, so no
-        competitor explanation can survive — it has nothing to be tested against.
-        """
-        ctx, obs = _context(self.df, self.schema, "readmission_rate")
-        result = investigate(self.df, self.schema, obs, "test_uid", llm=None)
-
-        blob = " ".join(
-            f"{h.get('title', '')} {h.get('statement', '')} {h.get('mechanism', '')}"
-            for h in result["hypotheses"]).lower()
-        self.assertTrue(result["hypotheses"], "a real movement produced no explanation")
-        for term in RETAIL_LEAKAGE:
-            self.assertNotIn(term, blob, f"retail vocabulary '{term}' leaked into a hospital "
-                                         f"investigation")
-
-    def test_hypotheses_name_the_hospitals_own_measures(self):
-        ctx, obs = _context(self.df, self.schema, "readmission_rate")
-        result = investigate(self.df, self.schema, obs, "test_uid", llm=None)
-        causes = {h.get("cause_metric") for h in result["hypotheses"]} - {None}
-        self.assertTrue(causes <= set(self.schema.available_kpis),
-                        "a hypothesis cited a measure this dataset does not have")
-        self.assertIn("readmissions", causes,
-                      "the numerator of the KPI that moved should be a candidate driver")
 
 
 # ---------------------------------------------------------------------------
@@ -283,246 +226,6 @@ class TestDriverGraph(HospitalTestCase):
         self.assertIn("readmission_rate__chg", table.columns)
         self.assertIn("admissions__chg", table.columns)
         self.assertEqual(len(table), len(observe.available_timeframes(self.df)) - 1)
-
-
-# ---------------------------------------------------------------------------
-class TestMaterialSignals(HospitalTestCase):
-    def setUp(self):
-        self.ctx, self.obs = _context(self.df, self.schema, "readmission_rate")
-
-    def test_noise_is_not_offered_as_something_to_explain(self):
-        signals = material_signals(self.obs, {}, self.ctx.focus)
-        self.assertLess(signals.signals_retained, signals.signals_considered,
-                        "nothing was filtered, so the boundary is doing no work")
-        for entry in signals.material:
-            self.assertTrue(entry["moved"])
-
-    def test_a_named_but_flat_comparison_is_kept_as_context(self):
-        """
-        "Why did X fall even though Y was flat" is unanswerable without Y.
-        """
-        tfs = observe.available_timeframes(self.df)
-        tf = observe.Timeframe(tfs[-1]["year"], tfs[-1]["quarter"])
-        comparisons = {"admissions": observe.observe(self.df, self.schema, "admissions",
-                                                     tf, "previous_period")}
-        signals = material_signals(self.obs, comparisons, self.ctx.focus)
-        carried = {e["kpi"]: e for e in signals.material + signals.context}
-        self.assertIn("admissions", carried)
-        self.assertTrue(carried["admissions"]["named_in_question"])
-
-    def test_nothing_material_produces_no_hypotheses(self):
-        """Asked to explain noise, the honest answer is that there is nothing to explain."""
-        flat = dict(self.obs)
-        flat["verdict"] = "within_normal_variation"
-        flat["kpi_scoreboard"] = []
-        signals = material_signals(flat, {}, {})
-        self.assertTrue(signals.nothing_material)
-
-        result = investigate(self.df, self.schema, self.obs, "test_uid",
-                             llm=None, signals=signals)
-        self.assertTrue(result["nothing_to_explain"])
-        self.assertEqual(result["hypotheses"], [])
-
-
-# ---------------------------------------------------------------------------
-class TestLlmHypothesisContract(HospitalTestCase):
-    def setUp(self):
-        self.ctx, self.obs = _context(self.df, self.schema, "readmission_rate")
-        self.allowed = list(self.schema.available_kpis)
-
-    def _proposal(self, **overrides):
-        base = {
-            "key": "example", "title": "An example", "statement": "Something happened.",
-            "mechanism": "How it happened.", "family": "quality", "domain_specific": True,
-            "predictions": [{"metric": "readmissions", "expected_direction": "up",
-                             "reference_pct": 10, "weight": 1.0, "rationale": "r"}],
-            "cause_metric": "readmissions", "cause_direction": "up",
-            "contradiction_queries": ["readmissions stable"], "rag_queries": [], "missing": [],
-        }
-        base.update(overrides)
-        return {"hypotheses": [base]}
-
-    def test_a_prediction_on_a_metric_that_does_not_exist_is_dropped(self):
-        raw = self._proposal(
-            key="competitor_pricing", title="Competitor pricing",
-            predictions=[{"metric": "competitor_price_index", "expected_direction": "down",
-                          "reference_pct": 5, "weight": 1.0, "rationale": "r"}],
-            cause_metric="competitor_price_index")
-        self.assertEqual(build_llm_candidates(self.ctx, raw, self.allowed), [],
-                         "an untestable hypothesis reached the reader")
-
-    def test_a_prediction_that_did_not_hold_becomes_evidence_against(self):
-        """
-        The model states expectations; the data decides what they support.
-        """
-        raw = self._proposal(
-            predictions=[{"metric": "discharges", "expected_direction": "up",
-                          "reference_pct": 5, "weight": 1.0, "rationale": "r"}],
-            cause_metric="discharges")
-        built = build_llm_candidates(self.ctx, raw, self.allowed)
-        self.assertTrue(built)
-        stances = {e["stance"] for e in built[0]["evidence"]}
-        self.assertIn("contradicting", stances,
-                      "discharges did not rise, so the prediction must count against")
-
-    def test_an_unknown_family_is_normalised_and_still_recommendable(self):
-        from app.engines.act import PLAYBOOK, generic_play
-
-        raw = self._proposal(family="clinical_capacity_nonsense")
-        built = build_llm_candidates(self.ctx, raw, self.allowed)
-        self.assertEqual(built[0]["family"], "other")
-        play = PLAYBOOK.get(built[0]["family"]) or generic_play(built[0])
-        self.assertTrue(play["actions"], "an unknown family produced no recommendation")
-
-    def test_braces_in_a_model_authored_action_do_not_raise(self):
-        from app.engines.act import generic_play
-
-        play = generic_play({"cause_metric": "readmissions"})
-        rendered = [a.replace("{focus}", "Emergency {ward}") for a in play["actions"]]
-        self.assertTrue(all(isinstance(r, str) for r in rendered))
-
-    def test_malformed_output_degrades_rather_than_raising(self):
-        self.assertEqual(build_llm_candidates(self.ctx, {"nonsense": True}, self.allowed), [])
-        self.assertEqual(build_llm_candidates(self.ctx, None, self.allowed), [])
-
-    def test_shortlist_reserves_a_place_for_each_category(self):
-        domain = [{"key": f"d{i}", "domain_specific": True, "prior_support": 5.0 - i,
-                   "prior_against": 0.0, "testable": True} for i in range(4)]
-        general = [{"key": "g1", "domain_specific": False, "prior_support": 0.4,
-                    "prior_against": 0.0, "testable": True}]
-        picked = shortlist(domain + general, limit=3)
-        self.assertIn("g1", [h["key"] for h in picked],
-                      "the general category was crowded out entirely")
-
-    def test_coverage_is_reported_honestly_when_a_category_is_empty(self):
-        only_general = [{"key": "g1", "domain_specific": False}]
-        summary = category_summary(only_general)
-        self.assertEqual(summary["domain_specific_count"], 0)
-        self.assertTrue(summary["coverage_note"])
-
-
-# ---------------------------------------------------------------------------
-class TestDeterminism(HospitalTestCase):
-    def test_the_same_question_yields_the_same_numbers(self):
-        runs = []
-        for _ in range(3):
-            ctx, obs = _context(self.df, self.schema, "readmission_rate")
-            result = investigate(self.df, self.schema, obs, "test_uid", llm=None)
-            runs.append((
-                round(obs["change_pct"], 6),
-                [(h["key"], h["prior_support"], h["prior_against"])
-                 for h in result["hypotheses"]],
-            ))
-        self.assertEqual(runs[0], runs[1])
-        self.assertEqual(runs[1], runs[2])
-
-    def test_the_pipeline_completes_with_no_model_available(self):
-        ctx, obs = _context(self.df, self.schema, "readmission_rate")
-        result = investigate(self.df, self.schema, obs, "test_uid", llm=None)
-        self.assertFalse(result["llm_used"])
-        self.assertTrue(result["hypotheses"],
-                        "the deterministic floor produced nothing without a model")
-
-
-# ---------------------------------------------------------------------------
-class TestPersonaReframing(HospitalTestCase):
-    """
-    The same findings, different advice.
-
-    Persona may change what a reader is told to do and how much detail they are
-    given. It may not change what the evidence says, how confident the system
-    is, or which explanation ranked first — if it could, two colleagues could
-    read one investigation and disagree about what happened.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        from app.engines.act import act
-        from app.engines.contest import contest
-
-        ctx, cls.obs = _context(cls.df, cls.schema, "readmission_rate")
-        cls.investigation = investigate(cls.df, cls.schema, cls.obs, "test_uid", llm=None)
-        cls.contested = contest(cls.df, cls.schema, cls.obs, cls.investigation,
-                                "test_uid", llm=None)
-        cls.views = {}
-        for persona in ("business_analyst", "business_manager", "business_leader",
-                        "domain_specialist", "operational_user"):
-            result = act(cls.df, cls.obs, cls.investigation, cls.contested, llm=None,
-                         resolver=cls.schema.contract_resolver, persona=persona)
-            cls.views[persona] = result["persona_view"]
-
-    def test_the_evidence_is_identical_for_every_persona(self):
-        bases = [
-            [(c["hypothesis_key"], c["confidence"], c["causal_claim"],
-              tuple(c["supporting_evidence"]), tuple(c["contradicting_evidence"]))
-             for c in view["recommendation_basis"]]
-            for view in self.views.values()
-        ]
-        first = bases[0]
-        for other in bases[1:]:
-            self.assertEqual(first, other,
-                             "a persona changed the evidence, the ranking or the confidence")
-
-    def test_the_recommendations_genuinely_differ(self):
-        actions = {p: v["recommendations"][0]["action"] for p, v in self.views.items()}
-        self.assertEqual(len(set(actions.values())), len(actions),
-                         f"two personas were given identical advice: {actions}")
-
-    def test_each_persona_gets_its_own_horizon_and_owner(self):
-        horizons = {v["recommendations"][0]["timeframe"] for v in self.views.values()}
-        owners = {v["recommendations"][0]["owner"] for v in self.views.values()}
-        self.assertGreaterEqual(len(horizons), 4)
-        self.assertGreaterEqual(len(owners), 4)
-        self.assertEqual(self.views["operational_user"]["recommendations"][0]["timeframe"],
-                         "immediately")
-
-    def test_no_persona_may_act_on_an_unestablished_driver(self):
-        allowed = {c["cause_metric"] for c in
-                   self.views["business_analyst"]["recommendation_basis"]}
-        allowed |= {c["hypothesis_key"] for c in
-                    self.views["business_analyst"]["recommendation_basis"]}
-        for persona, view in self.views.items():
-            for rec in view["recommendations"]:
-                basis = rec.get("based_on")
-                if basis:
-                    self.assertIn(basis, allowed,
-                                  f"{persona} was advised to act on something the evidence "
-                                  f"did not establish")
-
-    def test_depth_follows_the_persona(self):
-        analyst = len(self.views["business_analyst"]["summary"])
-        leader = len(self.views["business_leader"]["summary"])
-        self.assertGreater(analyst, leader,
-                           "the analyst summary should carry more than the leader's")
-
-    def test_an_unknown_persona_falls_back_to_neutral_framing(self):
-        from app.personas import persona_for
-
-        self.assertEqual(persona_for(None).key, "business_analyst")
-        self.assertEqual(persona_for("chief_vibes_officer").key, "business_analyst")
-
-    def test_a_model_may_not_smuggle_in_an_unsupported_action(self):
-        """A reframing that reaches outside the evidence is dropped, not shown."""
-        from app.personas.reframe import reframe
-        from app.personas.profiles import BUSINESS_LEADER
-
-        class Inventing:
-            enabled = True
-
-            def write_for_persona(self, *a, **k):
-                return {"summary": "s", "recommendations": [
-                    {"action": "Cut prices to beat the competitor.", "why": "w",
-                     "owner": "o", "timeframe": "t", "based_on": "competitor_price_index"},
-                    {"action": "Review readmissions.", "why": "w", "owner": "o",
-                     "timeframe": "t", "based_on": "readmissions"},
-                ]}
-
-        view = reframe(BUSINESS_LEADER, self.obs, self.investigation, self.contested,
-                       [], llm=Inventing())
-        actions = [r["action"] for r in view["recommendations"]]
-        self.assertNotIn("Cut prices to beat the competitor.", actions)
-        self.assertIn("Review readmissions.", actions)
 
 
 # ---------------------------------------------------------------------------

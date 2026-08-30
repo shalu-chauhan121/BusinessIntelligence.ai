@@ -1855,3 +1855,183 @@ are data about the registry's 56 signatures and would be actively misleading to 
 the filtering rule is the logic under test. One more consequence worth naming: an answer to a
 question the dataset cannot support now correctly reports `kpis_used: []`, which is what
 `t1_out_of_extent` asserts -- an answer resting on no data should say so.
+
+## 64. A9 retirement: three modules the plan named for deletion were kept, on measured test coupling
+
+**Context/problem.** A9 is the designated deletion batch: retire the 4-stage pipeline
+(`engines/{act,contest,hypotheses,investigate,llm_hypotheses,signals}.py`, `services/pipeline.py`),
+its six endpoints, its prompts, its redaction paths, and collapse `InvestigationPage.jsx` to one
+`answer` + evidence panel. Batches 1-16 (Layers C/O/I/X/A1-A8) were already complete and untouched
+by this one. The plan going in named `personas/reframe.py`, `query/understanding.py` +
+`query/grounding.py` + `query/periods.py`, and most of `engines/analysis.py` as candidates for
+deletion alongside the pipeline proper.
+
+**Options considered, per module.**
+- `personas/`: delete the whole package (the plan's initial read) vs. delete only `reframe.py` and
+  keep `profiles.py`/`__init__.py`.
+- `query/understanding.py` + `query/grounding.py` (+ `periods.py`, which `understanding.py` needs):
+  delete along with `/questions/investigate` vs. keep them and keep `/questions/interpret` as a
+  surviving route.
+- `engines/analysis.py`: prune `correlate`/`lead_lag`/`counterexamples`/`member_change_table`/
+  `coverage_report` down to only what `validate_rca.py` and `agent/` still call, vs. leave the whole
+  module untouched.
+
+**Choice made, per module.**
+- `personas/`: kept `profiles.py` + `__init__.py`; deleted only `reframe.py`.
+- `query/`: kept `understanding.py`, `grounding.py`, `periods.py` in full; kept `/questions/interpret`.
+- `engines/analysis.py`: left entirely untouched.
+
+**Reason.** In each case the plan's assumption -- that the module existed only to feed the retired
+pipeline -- did not survive contact with the actual test suite. `routes_auth.py` imports
+`persona_for_role`/`persona_options` from `personas/__init__.py` for the Settings page persona
+switcher (decision 26), a live, unrelated feature; only `reframe.py`'s reframing engine was
+pipeline-only. `query/grounding.py` has two independent, substantial test files
+(`test_dimension_catalogue.py`, `test_kpi_search.py`) exercising `ground_question`/`_normalise`/
+`_split_contrast` that have nothing to do with `investigate`/`contest`; `understanding.py` needs
+`periods.py`'s `resolve_period` to keep working, so keeping one meant keeping the other two.
+`engines/analysis.py`'s `correlate`, `member_change_table` and `counterexamples` are imported
+directly by `test_resolver_propagation.py` (the C2 resolver-propagation regression test) and
+`test_consistency.py` (X2's consistency tooling) -- both protecting live correctness invariants,
+not the narrative pipeline. Deleting any of the three would have cost working, independently-valued
+test coverage for zero benefit: none of the three is prose, none of the three violates "every tool
+returns numbers and facts only", and nothing downstream needed them gone.
+
+**Consequence/trade-off.** `/api/questions/interpret` survives as a seventh live endpoint alongside
+`/dashboard`, `/meta/timeframes`, `/questions/ask` and the three `/investigations` routes -- one
+more endpoint than the plan's minimal end state, in exchange for zero test breakage on functionality
+the agent loop does not supersede (C5's `search_kpis` replaces the *blocking* behaviour
+`understanding.py` used to have, not the grounding computation itself). `engines/analysis.py`
+carries two genuinely-dead functions (`lead_lag`, `coverage_report`, zero callers anywhere) as an
+accepted small residue rather than a risk to a still-load-bearing module.
+
+## 65. `/questions/ask` gained `persist`, breaking A7's original "nothing is persisted" design
+
+**Context/problem.** A7 (decision 61) deliberately shipped `/api/questions/ask` with no `persist`
+field: an `AgentAnswer` has no kpi/verdict/hypothesis, the shape a saved investigation was built
+around, so persistence was left for a later decision. A9's frontend collapse needs History to keep
+working, and `InvestigationRepository` has no consumer left once `run_full`/`run_question` are gone.
+
+**Options considered.** (a) persist agent answers via a schema migration on
+`InvestigationRepository`; (b) drop History entirely; (c) keep `/investigations` serving only
+pre-existing rows, read-only. Put to the user directly; (a) was chosen.
+
+**Reason.** `InvestigationRepository.create` is already a generic `{**payload}` store with no
+schema enforcement (`db/repositories.py:256`), so an `AgentAnswer` (`question`/`answer`/`evidence`/
+`kpis_used`/`periods_used`/`engine`) persists exactly as it is -- no migration is actually needed,
+only a new `persist: bool = False` field on `AgentQuestionRequest` and a conditional write in the
+route. Defaulting to `false` (rather than A7's implicit "never") keeps the endpoint's existing
+callers unaffected and makes saving an explicit, opt-in act, matching what a "History" feature
+means to a user asking one-off questions.
+
+**A real bug caught and fixed during implementation.** The first version built the response
+`payload` dict, embedded it as `"result": payload` in the document passed to `create()`, and only
+*afterwards* set `payload["investigation_id"]`. Because `"result": payload` is the same object
+reference as `payload` itself, patching it after the write raced whatever `create()` had already
+done with the reference (serialise it, hold it, or both) -- the persisted `result.investigation_id`
+would come back `None`. Fixed by reserving the id upfront (`new_id("inv")`) before either the
+response or the persisted document is built, so both are fully formed before either is used. Caught
+by a new integration test (`test_a_persist_field_in_the_body_saves_the_answer`) rather than by
+inspection.
+
+**Consequence/trade-off.** `GET /api/investigations` and `GET /api/investigations/{id}` now serve
+two shapes: rows saved by the retired pipeline (no `answer` key) render as
+`{"status": "legacy_format", ...}`; rows saved by the agent loop render the full
+`AgentAnswerResponse` body, unredacted, matching `/questions/ask`'s own `redaction: "none"`.
+`HistoryPage.jsx` and `InvestigationPage.jsx` both branch on this explicitly rather than assuming
+one shape.
+
+## 66. `determine_focus` moves to `engines/observe.py`, not deleted with `investigate.py`
+
+**Context/problem.** `scripts/validate_rca.py`'s temporal-ordering check (the one asserting a
+decline's cause postdates the decline itself) scopes its onset comparison to "the focus the engine
+itself selected" -- `investigate.determine_focus`, a pure 25-line function reading only
+`observation["drivers"]`. Deleting `investigate.py` wholesale would silently cost this check, the
+project's only end-to-end causal-correctness gate for temporal ordering.
+
+**Choice made.** Move `determine_focus` (and its two thresholds, renamed
+`MIN_FOCUS_CONTRIBUTION_PCT`/`MIN_FOCUS_OVER_INDEX` to avoid colliding with any future `observe.py`
+constant) verbatim into `engines/observe.py`. `validate_rca.py`'s `run_pipeline()` now calls it
+directly instead of running the retired `investigate()` stage.
+
+**Reason.** `determine_focus` has no dependency on anything else in `investigate.py` -- it takes an
+`observation` dict and returns a `Dict[str, str]`, nothing more. `observe.py` already produces the
+`observation` this function reads, so the move puts the function next to its only real input rather
+than leaving a one-function shim module alive for a single caller.
+
+**Consequence/trade-off.** A static import-gate test (`test_legacy_retirement.py`) that walks the
+whole `app/` and `scripts/` tree with `ast` caught a second, easy-to-miss call site during this
+batch: `driver_graph._dimension_drivers` had its own lazy
+`from .investigate import MIN_CONTRIBUTION_PCT, MIN_OVER_INDEX`, undetected by grepping call sites
+of `determine_focus` alone since it imported the threshold constants directly rather than the
+function. Repointed at the moved constants in `observe.py`. This is the argument for the
+AST-walking guard test existing at all: a substring search would have found the docstring's
+*mention* of `determine_focus` and stopped there.
+
+## 67. `docs/API_CONTRACT.md` rewritten for the six retired endpoints; `RANKING.md`/`ARCHITECTURE.md`/`TASK_BOARD.md`/`DEMO_SCRIPT.md` left as-is
+
+**Context/problem.** A9's plan named doc updates in scope. `API_CONTRACT.md`'s `## Analysis`
+section (~390 lines) documented the four stage endpoints, `/investigations/run` and
+`/questions/investigate` in full request/response detail; `RANKING.md`, `ARCHITECTURE.md` and
+`DEMO_SCRIPT.md` reference `contest.py`/`score_hypothesis`/the four-stage flow narratively, at a
+combined ~1,900 lines across four files.
+
+**Choice made.** Rewrote `API_CONTRACT.md`'s endpoint table and the `## Analysis` section in full,
+including the response shape for `GET /api/investigations` (both the live and `legacy_format`
+cases) and `/questions/ask`'s new `persist`/`investigation_id`. Left `RANKING.md`, `ARCHITECTURE.md`,
+`TASK_BOARD.md` and `DEMO_SCRIPT.md` untouched.
+
+**Reason.** `API_CONTRACT.md` is the one doc a client integrator actually depends on being
+accurate -- a stale endpoint table actively misleads in a way a stale architecture narrative does
+not. The other four are long-form prose (a driver-ranking methodology writeup, a system-design
+narrative, a historical phase-by-phase task log already marked complete, a demo walkthrough) where
+a correct but shallow pass would misrepresent how much of their content actually changed, and a
+genuinely thorough pass is a rewrite-sized task of its own, disproportionate to a batch whose
+deliverable is the code retirement.
+
+**Consequence/trade-off.** `RANKING.md:334,502,523` still link to `engines/contest.py`, which no
+longer exists, and its causal-consistency narrative still describes `score_hypothesis`'s ledger.
+`TASK_BOARD.md` was already confirmed stale before this batch (a pre-A9 Phase 0-7 record, not the
+C/O/I/X/A board these decisions track). Flagged here rather than silently left inconsistent;
+whoever next edits those docs for an unrelated reason should reconcile this in passing rather than
+this batch attempting it speculatively.
+
+## 68. X5 ships two of its four tools; the sensitivity/subsample pair is deferred pending A8's live report
+
+**Context/problem.** Task X5 (the Contest robustness family: `test_sensitivity_to_outliers`,
+`estimate_effect_size`, `test_sensitivity_to_period`, `test_subsample_stability`) is marked
+provisional in the master plan itself: "the Part 2.5 trace exercise never called any of these across
+all 15 questions ... before building, run the eval suite from A8 and cut whatever the agent does not
+actually reach for." `scripts/validate_agent.coverage()` produces exactly that `never_fired` report,
+but it needs a live `ANTHROPIC_API_KEY` and real spend, and the 17 scripted `CASES` were never
+written to invite a robustness check, so their silence is weak evidence either way.
+
+**Options considered.**
+- (a) Build all four now, let a later eval cut what does not earn its place.
+- (b) Run the live gate first, build only the survivors.
+- (c) Build the two the plan marks unconditional (`test_sensitivity_to_outliers`,
+  `estimate_effect_size`), defer the two the plan already flags as weakest pending the gate.
+
+**Choice made.** (c). The live gate (option b) is the right process and remains the next step, but
+it is not runnable from this environment; (a) would ship tools with a documented ~0% reach rate.
+
+**Reason.** The plan's own analysis already separates the four: the outlier-drop test answers the
+question a reviewer asks first ("is this just one big account") and `find_outlier_contributors`
+(I5) hands it the candidate member for free; `estimate_effect_size` gives magnitude and a
+distribution-free interval that `significance.fisher_interval` (X3) cannot, since Fisher's z assumes
+a normality these member counts do not support. `test_subsample_stability` is close to meaningless
+on the fixtures that exist -- split-half on retail `region`'s four members -- and `estimate_effect_size`'s
+bootstrap CI already carries the instability signal it would report. `test_sensitivity_to_period`
+is cheap (`ComparisonEngine.compare` is already generalised to arbitrary A/B) but needs the gate's
+evidence that the model reaches for window-choice robustness at all. Deferring two is not the same
+as cutting them; the gate decides.
+
+**Consequence/trade-off.** The registry goes 56 -> 58 tools, both in the `contest` group.
+Progressive disclosure stays off (decision 60): the tool array is still the loop's one cache
+breakpoint and narrowing it per-turn forfeits that. `sensitivity.py` composes `CorrelationEngine`
+and `find_outlier_contributors` and owns only the leave-one-out refits (`numpy.corrcoef` over a
+subset of `PairedSample`'s published vectors) and the `scipy.stats.bootstrap` call. That bootstrap
+is seeded at a fixed `BOOTSTRAP_SEED = 0` -- a deliberate choice of G5 reproducibility over per-call
+entropy, since the interval is a property of the sample; `test_sensitivity.py::TestTheBootstrapIsSeeded`
+is the regression that an unseeded call would fail. `test_tier_eval.py`'s coverage assertions were
+already written against `len(TOOL_SPECS)` and stay green; only a stale "56" in a method name and two
+docstrings was corrected.
