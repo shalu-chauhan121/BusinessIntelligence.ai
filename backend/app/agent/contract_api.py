@@ -36,8 +36,11 @@ from ..engines.metrics import (
     metric_spec,
     metric_unit,
 )
+from ..engines.driver_graph import _tags
 from ..kpi.resolver import available_keys as _resolver_available_keys
-from .errors import UnknownDimensionError, UnknownKpiError
+from .dimensions import (DEFAULT_PAGE_SIZE, MemberCatalogue, MemberMatch,
+                         MemberPage)
+from .errors import UnknownDimensionError, UnknownKpiError, UnknownMemberError
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,9 @@ class KpiInfo:
 class DimensionInfo:
     name: str
     distinct_count: Optional[int] = None
+    # False when the column is too wide to be searched by free text. Its values
+    # stay listable and resolvable; only the scan is withheld.
+    indexed: bool = True
 
 
 class ContractAPI:
@@ -118,6 +124,28 @@ class ContractAPI:
             return _resolver_available_keys(self._resolver, df)
         return [k for k in self._schema.available_kpis if k in df.columns]
 
+    def metric_columns(self) -> List[str]:
+        """The raw source columns `prepare` treats as measures -- what
+        `check_data_quality` (`agent/quality.py`) reports zero-fill and null
+        counts over. Distinct from a KPI key: a KPI can be a formula over
+        several of these."""
+        return list(self._schema.base_metrics) + list(self._schema.extra_metrics)
+
+    def imputed_cells(self) -> Optional[Any]:
+        """Per-column count of cells `prepare`'s `fillna(0.0)` fabricated
+        (`metrics.py:344`), or `None` when `preserve_missing` was on and
+        nothing was filled. This is the one place a fabricated zero is still
+        distinguishable from a real one after `prepare` has already made them
+        byte-identical in the frame itself."""
+        return self._schema.imputed_cells
+
+    def quarters_held(self) -> int:
+        """How many distinct quarters this dataset holds, dataset-wide --
+        what `detect_schema`'s 'fewer than 5 quarters of history' warning
+        (`metrics.py:296-301`) is about, as a typed fact rather than a
+        sentence."""
+        return len(self._schema.quarters)
+
     # -- semantics -------------------------------------------------------------
     def get_definition(self, key: str) -> Optional[Any]:
         """The full `KpiDefinition` behind `key`, or `None` for a contract-less
@@ -137,6 +165,32 @@ class ContractAPI:
 
     def description(self, key: str) -> str:
         return metric_description(key, self._resolver)
+
+    def source_fields(self, key: str) -> List[str]:
+        """The raw columns this KPI reads, from the compiled spec or its
+        definition. What binds a question's vocabulary to a KPI through the
+        concept library, so the search layer must not reach past the facade
+        into `contract_resolver` for it."""
+        spec = metric_spec(key, self._resolver)
+        fields = getattr(spec, "source_fields", None) if spec is not None else None
+        if not fields:
+            definition = self.get_definition(key)
+            fields = getattr(definition, "source_fields", None) or []
+        return [str(f) for f in fields]
+
+    def tags(self, key: str) -> List[str]:
+        """The semantic tags discovery assigned this KPI."""
+        return sorted(_tags(metric_spec(key, self._resolver)))
+
+    def relevance(self, key: str) -> str:
+        """Why this KPI matters to this business, when the contract says so."""
+        definition = self.get_definition(key)
+        return getattr(definition, "relevance", "") or ""
+
+    def business_definition(self, key: str) -> str:
+        """The contract's prose definition of what this KPI means."""
+        definition = self.get_definition(key)
+        return getattr(definition, "business_definition", "") or ""
 
     def is_additive(self, key: str) -> bool:
         spec = self.require(key)
@@ -167,20 +221,92 @@ class ContractAPI:
     # -- dimensions ------------------------------------------------------------
     def list_dimensions(self, df: Optional[pd.DataFrame] = None) -> List[DimensionInfo]:
         """
-        Every dimension column on this dataset.
+        Every dimension column on this dataset, with its cardinality.
 
-        `distinct_count` is only computed when a dataframe is supplied — the
-        schema alone does not carry member cardinality (see the C4 gap this
-        facade does not yet close: `schema.dimension_members` is read at
-        `grounding.py:320` but has never existed).
+        `distinct_count` is the true, uncapped count -- never the size of the
+        lookup index, which is capped. It comes from the attached catalogue, or
+        from `df` when one is supplied, and is None only when neither is.
         """
+        catalogue = self._catalogue(df, required=False)
         out: List[DimensionInfo] = []
         for name in self._schema.dimensions:
-            count = int(df[name].nunique()) if (df is not None and name in df.columns) else None
-            out.append(DimensionInfo(name=name, distinct_count=count))
+            count: Optional[int] = None
+            indexed = True
+            if df is not None and name in df.columns:
+                count = int(df[name].nunique())
+            if catalogue is not None and name in catalogue.dimensions():
+                count = catalogue.count(name)
+                indexed = catalogue.is_indexed(name)
+            out.append(DimensionInfo(name=name, distinct_count=count, indexed=indexed))
         return out
 
     def require_dimension(self, name: str) -> str:
         if name not in self._schema.dimensions:
             raise UnknownDimensionError(name, list(self._schema.dimensions))
         return name
+
+    # -- dimension members -----------------------------------------------------
+    def _catalogue(self, df: Optional[pd.DataFrame] = None, *,
+                   required: bool = True) -> Optional[MemberCatalogue]:
+        """
+        The attached catalogue, or one built from a supplied frame.
+
+        `dataset_service.load` attaches a catalogue, but a schema assembled by a
+        bare `detect_schema`/`prepare` -- which is how much of the test suite and
+        the KPI bootstrap path build theirs -- has none. Accepting `df` mirrors
+        `list_dimensions` and keeps those callers working, rather than making
+        them silently see a dataset with no members.
+        """
+        attached = getattr(self._schema, "member_catalogue", None)
+        if attached is not None:
+            return attached
+        if df is not None:
+            return MemberCatalogue(df, self._schema.dimensions)
+        if required:
+            raise UnknownDimensionError(
+                "<no member catalogue>", list(self._schema.dimensions))
+        return None
+
+    def member_catalogue(self, df: Optional[pd.DataFrame] = None) -> Optional[MemberCatalogue]:
+        """The member index for this dataset, when one is reachable."""
+        return self._catalogue(df, required=False)
+
+    def list_members(self, dimension: str, offset: int = 0,
+                     limit: int = DEFAULT_PAGE_SIZE,
+                     df: Optional[pd.DataFrame] = None) -> MemberPage:
+        """
+        One page of the values a dimension holds.
+
+        `require_dimension` first, so a dimension the model invented is an
+        `UnknownDimensionError` before any pandas work happens.
+        """
+        self.require_dimension(dimension)
+        return self._catalogue(df).members(dimension, offset=offset, limit=limit)
+
+    def resolve_member(self, dimension: str, text: str,
+                       df: Optional[pd.DataFrame] = None) -> str:
+        """
+        The frame's own spelling of a value named in any case or spacing.
+
+        Raises rather than returning None: a filter on a member that does not
+        exist yields an empty slice, and an empty slice is indistinguishable
+        from a real zero once it reaches a number.
+        """
+        self.require_dimension(dimension)
+        catalogue = self._catalogue(df)
+        resolved = catalogue.resolve(dimension, text)
+        if resolved is None:
+            page = catalogue.members(dimension, limit=UnknownMemberError.MAX_ALTERNATIVES)
+            raise UnknownMemberError(dimension, text, list(page.members))
+        return resolved
+
+    def find_members(self, text: str,
+                     df: Optional[pd.DataFrame] = None) -> List[MemberMatch]:
+        """
+        Every dimension whose values include this phrase.
+
+        All of them, never one: a value held by two columns is a real ambiguity
+        and the caller decides what to do about it.
+        """
+        catalogue = self._catalogue(df, required=False)
+        return list(catalogue.lookup(text)) if catalogue is not None else []

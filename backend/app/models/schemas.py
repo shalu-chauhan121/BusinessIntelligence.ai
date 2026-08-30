@@ -90,6 +90,67 @@ class SearchRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# agentic question answering  (POST /api/questions/ask)
+#
+# Typed both ways, unlike the four stage endpoints in the same router. The
+# reason is the one given for the KPI contract below: the shape is the artefact
+# a client depends on. `agent.loop.AgentAnswer` is already a frozen dataclass
+# with a fixed set of fields, and `status` is a closed set the client must
+# branch on — both belong in /openapi.json rather than being discovered by
+# reading route code.
+# ---------------------------------------------------------------------------
+AgentStatus = Literal["ok", "max_turns_exhausted", "truncated", "refused", "llm_required"]
+
+
+class AgentQuestionRequest(BaseModel):
+    """
+    A business question for the agent loop.
+
+    Deliberately narrower than `QuestionRequest`. It has no `persist` (nothing
+    is saved — an `AgentAnswer` has no kpi/verdict/hypothesis, which is what an
+    investigation row is shaped around), no `use_llm` (the loop has no
+    deterministic fallback by design, so `False` would only mean "return
+    `llm_required` on purpose"), and no `persona` (`prompts.agent_system` takes
+    a seed dict and has no persona seam — a field the server accepted and then
+    ignored would be worse than an absent one).
+
+    `max_turns` is deliberately not exposed either: it is a cost lever a client
+    should not hold, and `settings.llm_max_turns` already governs it.
+    """
+
+    question: str = Field(min_length=1, max_length=500,
+                          description="e.g. 'What should I be worried about right now?'")
+    dataset_id: Optional[str] = None
+
+
+class AgentEvidenceStep(BaseModel):
+    """One tool call, exactly as `LLMClient._call_with_tools` recorded it."""
+
+    step: int
+    tool: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+    # Already JSON-safe: `registry._deep_safe` applies `metrics.safe` to every
+    # leaf of every tool result before it reaches the trace.
+    result: Any = None
+    is_error: bool = False
+
+
+class AgentAnswerResponse(BaseModel):
+    """`agent.loop.AgentAnswer`, serialised, plus the blocks every analysis response carries."""
+
+    status: AgentStatus
+    question: str
+    answer: str
+    evidence: List[AgentEvidenceStep] = Field(default_factory=list)
+    kpis_used: List[str] = Field(default_factory=list)
+    periods_used: List[Any] = Field(default_factory=list)
+    engine: Dict[str, Any] = Field(default_factory=dict)
+    dataset: Dict[str, Any] = Field(default_factory=dict)
+    view: Dict[str, Any] = Field(default_factory=dict)
+    telemetry: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
 # KPI contract
 #
 # Unlike the analysis endpoints, which return `Dict[str, Any]`, the KPI contract

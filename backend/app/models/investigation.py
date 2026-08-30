@@ -31,7 +31,8 @@ from pydantic import BaseModel, Field
 PeriodSource = Literal["explicit", "inferred_default", "dataset_latest"]
 KpiRole = Literal["outcome", "comparison", "filter_context"]
 MatchBasis = Literal["exact_name", "semantic_tag", "concept_alias",
-                     "business_definition", "llm_proposed_verified"]
+                     "business_definition", "relevance_text",
+                     "llm_proposed_verified"]
 IntentType = Literal["change_explanation", "comparison", "ranking",
                      "threshold_check", "unsupported"]
 AmbiguityKind = Literal["outcome_unresolved", "outcome_multiple", "period_vague",
@@ -66,10 +67,13 @@ class Ambiguity(BaseModel):
     """
     Something the interpreter could not settle.
 
-    `blocking` is the whole point: an unresolvable outcome KPI stops the
-    investigation and asks, while a merely vague period proceeds on a stated
-    default. Guessing which KPI a question is about produces a confident answer
-    to a question nobody asked, which is worse than asking.
+    `blocking` is the whole point, and the line it draws is between *nothing*
+    and *several*. An outcome KPI that resolves to nothing stops the
+    investigation and asks, because guessing produces a confident answer to a
+    question nobody asked. An outcome that resolves to several proceeds on the
+    best-scoring one with `assumed` naming it and `candidates` listing the rest,
+    because every one of them is a measure this dataset really has. A vague
+    period proceeds on a stated default for the same reason.
     """
 
     kind: AmbiguityKind

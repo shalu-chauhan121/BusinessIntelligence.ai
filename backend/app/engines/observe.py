@@ -365,7 +365,11 @@ def decompose_dimension(cur: pd.DataFrame, base: pd.DataFrame, dimension: str,
             })
 
     rows.sort(key=lambda r: abs(r["change_abs"] or 0), reverse=True)
-    head, tail = rows[:max_items], rows[max_items:]
+    # `rows[:None]` and `rows[None:]` both return every row, so `max_items=None`
+    # used to duplicate the whole member list into a same-named "Other" row on
+    # top of the members it was meant to summarise. Callers that want every
+    # member with no rollup pass `max_items=None` explicitly for that reason.
+    head, tail = (rows, []) if max_items is None else (rows[:max_items], rows[max_items:])
     if tail:
         head.append({
             "name": f"Other ({len(tail)} members)",

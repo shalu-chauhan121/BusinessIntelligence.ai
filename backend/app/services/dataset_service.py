@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 from ..config import get_settings
 from ..db.repositories import DatasetRepository, now_iso
+from ..agent.dimensions import MemberCatalogue
 from ..engines.metrics import DatasetSchema, detect_schema, prepare
 
 _CACHE: Dict[str, Tuple[float, pd.DataFrame, DatasetSchema]] = {}
@@ -306,6 +307,10 @@ def rebuild_reconciled_view(uid: str, dataset_id: str, as_of: Optional[str] = No
         except OSError:                              # pragma: no cover - best effort
             pass
     clear_cache(path)
+    # The frame's members have just changed. Cached interpretations key on the
+    # contract version, not on the file, so a filter bound to a member that no
+    # longer exists would survive this rebuild without it.
+    _clear_intent_cache(dataset_id)
 
     repo.col.update_one({"_id": dataset_id}, {
         "path": path, "size_bytes": len(raw_csv), "checksum": digest, "schema": schema.to_dict(),
@@ -385,6 +390,10 @@ def load(dataset: Dict[str, Any], uid: Optional[str] = None,
         df_raw = pd.read_csv(path)
         schema = detect_schema(df_raw)
         df = prepare(df_raw, schema, preserve_missing=bool(dataset.get("sources")))
+        # Built once per (path, mtime) and shared by every `replace(schema)`
+        # copy below. The catalogue computes nothing until it is asked, so
+        # attaching it here costs a constructor call, not a pass over the frame.
+        schema.member_catalogue = MemberCatalogue(df, schema.dimensions)
         _CACHE[path] = (mtime, df, schema)
 
     if uid or dataset.get("sources"):
@@ -411,6 +420,15 @@ def load(dataset: Dict[str, Any], uid: Optional[str] = None,
                                      if k not in report.withheld_kpis]
 
     return df, schema
+
+
+def _clear_intent_cache(dataset_id: Optional[str] = None) -> None:
+    """Drop cached question interpretations for a dataset whose rows changed."""
+    try:
+        from ..query.understanding import clear_intent_cache
+        clear_intent_cache(dataset_id)
+    except Exception:                                # pragma: no cover - best effort
+        log.debug("Could not clear the intent cache for %s", dataset_id)
 
 
 def clear_cache(path: Optional[str] = None) -> None:

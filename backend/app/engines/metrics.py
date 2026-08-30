@@ -158,6 +158,19 @@ class DatasetSchema:
     # several sources (see `app.services.reconciliation`), else None. Like the
     # resolver and domain it is not a plain value, so `to_dict` serialises it.
     sources: Optional[Any] = field(default=None, repr=False, compare=False)
+    # The distinct values each dimension column holds, indexed for lookup and
+    # attached by `dataset_service.load` (see `app.agent.dimensions`). This is
+    # what `query.grounding` has always read as `dimension_members` and never
+    # found. An object rather than a value, so `to_dict` excludes it too.
+    member_catalogue: Optional[Any] = field(default=None, repr=False, compare=False)
+    # Per-metric-column count of cells `prepare` zero-filled, written by
+    # `prepare` itself. `None` when `preserve_missing` was on (nothing was
+    # filled; a NaN in the returned frame still means genuinely missing).
+    # `{}` when zero-fill ran and found nothing to fill. `{col: n}` otherwise --
+    # this is what makes a fabricated zero distinguishable from a real one after
+    # `prepare`'s `fillna(0.0)` has already erased the difference in the frame
+    # itself. Excluded from `to_dict` like the other attach-points above.
+    imputed_cells: Optional[Dict[str, int]] = field(default=None, repr=False, compare=False)
 
     # -- contract semantics -------------------------------------------------
     def kpi_definition(self, key: str) -> Optional[Any]:
@@ -178,9 +191,24 @@ class DatasetSchema:
         """The detected domain key, or 'uncertain' when nothing was detected."""
         return getattr(self.domain, "domain", None) or "uncertain"
 
+    @property
+    def dimension_members(self) -> Dict[str, Any]:
+        """
+        The values each dimension column holds, for the columns narrow enough
+        to search.
+
+        `query.grounding` has read this name since it was written; until the
+        catalogue existed it always resolved to nothing. A property rather than
+        a field on purpose: `to_dict` iterates `__dict__`, so a property cannot
+        leak into the persisted schema however the exclusion list drifts.
+        """
+        catalogue = self.member_catalogue
+        return catalogue.as_dict() if catalogue is not None else {}
+
     def to_dict(self) -> Dict[str, Any]:
         d = {k: v for k, v in self.__dict__.items()
-             if k not in ("contract_resolver", "domain", "sources")}
+             if k not in ("contract_resolver", "domain", "sources",
+                          "member_catalogue", "imputed_cells")}
         d["domain"] = self.domain_key
         d["sources"] = self.sources.to_dict() if self.sources is not None else None
         d["kpi_catalogue"] = [
@@ -314,14 +342,27 @@ def prepare(df: pd.DataFrame, schema: DatasetSchema,
     as good a default as any). A reconciled multi-source frame turns it on,
     because there a blank means "no source covered this" — zero-filling it would
     fabricate the very value reconciliation refused to invent.
+
+    Side effect: writes `schema.imputed_cells`, a per-column count of cells this
+    call zero-filled (`{}` when zero-fill ran and filled nothing, `None` when
+    `preserve_missing` was on and nothing was filled at all). Once `fillna(0.0)`
+    runs below, a fabricated zero and a real zero are byte-identical in the
+    returned frame -- this is the one place that difference is still knowable,
+    so it is recorded here rather than lost.
     """
     df = normalise_columns(df)
     df["_date"] = pd.to_datetime(df[schema.date_column], errors="coerce")
     df = df.dropna(subset=["_date"])
+    imputed: Optional[Dict[str, int]] = None if preserve_missing else {}
     for c in schema.base_metrics + schema.extra_metrics:
         if c in df.columns:
             numeric = pd.to_numeric(df[c], errors="coerce")
+            if not preserve_missing:
+                n_missing = int(numeric.isna().sum())
+                if n_missing:
+                    imputed[c] = n_missing
             df[c] = numeric if preserve_missing else numeric.fillna(0.0)
+    schema.imputed_cells = imputed
     for c in schema.dimensions:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("Unknown")

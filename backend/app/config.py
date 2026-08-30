@@ -31,10 +31,17 @@ class Settings(BaseSettings):
     # llm
     llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-5"
+    anthropic_model: str = "claude-opus-5"
     llm_max_tokens: int = 4000
     llm_timeout_seconds: int = 90
     llm_pricing_json: str = ""
+
+    # llm -- agent tool-use loop (A1). `llm_max_tokens` above stays the ceiling
+    # for the six single-turn `_call` roles; the tool loop needs its own,
+    # larger per-turn budget so the final answer is never truncated mid-thought.
+    llm_tool_max_tokens: int = 16000
+    llm_max_turns: int = 12
+    llm_effort: str = "high"
 
     # analysis
     anomaly_z_threshold: float = 2.0

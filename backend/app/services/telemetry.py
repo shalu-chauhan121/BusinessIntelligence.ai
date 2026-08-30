@@ -18,7 +18,10 @@ log = logging.getLogger(__name__)
 
 # Defaults are deliberately central and displayed as estimates. Override without
 # code changes with LLM_PRICING_JSON, e.g. {"model":{"input_per_1m":3,"output_per_1m":15}}.
-MODEL_PRICING = {"claude-sonnet-4-5": {"input_per_1m": 3.0, "output_per_1m": 15.0}}
+MODEL_PRICING = {
+    "claude-sonnet-4-5": {"input_per_1m": 3.0, "output_per_1m": 15.0},
+    "claude-opus-5": {"input_per_1m": 5.0, "output_per_1m": 25.0},
+}
 _current: contextvars.ContextVar[Optional["TelemetrySession"]] = contextvars.ContextVar("telemetry", default=None)
 
 
@@ -54,7 +57,8 @@ class TelemetrySession:
         self.saved: Optional[Dict[str, Any]] = None
 
     def record_call(self, *, model: str, system: str, user: str, response: Any = None,
-                    error: Optional[BaseException] = None, started: float) -> None:
+                    error: Optional[BaseException] = None, started: float,
+                    step: str = "Model API call") -> None:
         ended = time.perf_counter()
         usage = getattr(response, "usage", None)
         input_tokens = getattr(usage, "input_tokens", None)
@@ -67,7 +71,8 @@ class TelemetrySession:
         if input_tokens is None:
             input_tokens = estimate_tokens(system + user)
         if output_tokens is None:
-            text = "".join(getattr(part, "text", "") for part in getattr(response, "content", []) or [])
+            text = "".join(getattr(part, "text", "") for part in getattr(response, "content", []) or []
+                          if getattr(part, "type", "text") == "text")
             output_tokens = estimate_tokens(text)
         price = _pricing(model)
         cost = None if not price else (
@@ -79,7 +84,7 @@ class TelemetrySession:
             "total_tokens": int(input_tokens) + int(output_tokens), "tokens_estimated": estimated,
             "estimated_cost": cost, "cost_estimated": True, "latency_ms": round((ended - started) * 1000),
             "status": "failed" if error else "success", "error_type": type(error).__name__ if error else None,
-            "processing_type": "LLM Processing", "step": "Model API call",
+            "processing_type": "LLM Processing", "step": step,
         })
 
     def record_cache_lookup(self, hit: bool) -> None:
@@ -167,10 +172,12 @@ def request_telemetry(uid: str, endpoint: str) -> Iterator[TelemetrySession]:
 
 
 def track_llm_call(*, model: str, system: str, user: str, response: Any = None,
-                   error: Optional[BaseException] = None, started: float) -> None:
+                   error: Optional[BaseException] = None, started: float,
+                   step: str = "Model API call") -> None:
     session = _current.get()
     if session:
-        session.record_call(model=model, system=system, user=user, response=response, error=error, started=started)
+        session.record_call(model=model, system=system, user=user, response=response, error=error,
+                            started=started, step=step)
 
 
 def track_llm_cache(*, hit: bool) -> None:

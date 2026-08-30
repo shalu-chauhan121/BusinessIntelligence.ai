@@ -171,7 +171,8 @@ in that basis is dropped rather than shown.
 
 ## Analysis
 
-Shared request body (all fields optional):
+Shared request body (all fields optional). **`/api/questions/ask` does not take this body** —
+it has its own, narrower one; see below.
 
 ```json
 {
@@ -196,6 +197,7 @@ Shared request body (all fields optional):
 | `POST` | `/api/investigations/run` | All four stages for an explicitly named KPI, persisted |
 | `POST` | `/api/questions/interpret` | How a question is read, without running it |
 | `POST` | `/api/questions/investigate` | Ask a business question — **used by the UI** |
+| `POST` | `/api/questions/ask` | Ask a business question of the agent loop — prose answer + full evidence trail |
 | `GET` | `/api/investigations` | History |
 | `GET` | `/api/investigations/{id}` | A saved investigation |
 | `DELETE` | `/api/investigations/{id}` | Delete one |
@@ -234,17 +236,33 @@ A question that cannot be resolved returns **HTTP 200** with:
   "status": "needs_clarification",
   "intent": { "...": "the partial reading" },
   "ambiguities": [
-    { "kind": "outcome_multiple", "blocking": true,
-      "message": "This question could be about 'Recovery rate', 'Readmission rate'. Which did you mean?",
+    { "kind": "outcome_unresolved", "blocking": true,
+      "message": "No KPI in this dataset matches what the question is asking about. This dataset measures: Admissions, Recovery rate, ...",
       "candidates": [ { "kpi_key": "recovery_rate", "label": "Recovery rate" } ] }
   ]
 }
 ```
 
-This is a normal branch, not an error. The alternative — investigating the nearest KPI — produces a
-confident answer to a question the user did not ask. `blocking` distinguishes the two policies: an
-unresolvable KPI or a period the dataset does not hold stops the run, while a merely vague period
-proceeds on a stated default and is disclosed in `assumptions`.
+This is a normal branch, not an error. `blocking` draws one line, and it is between *nothing* and
+*several*:
+
+* **Nothing matched** (`outcome_unresolved`), or a period the dataset does not hold
+  (`unsupported_by_dataset`) — the run stops and asks. There is no answer to give, and investigating
+  the nearest KPI produces a confident answer to a question the user did not ask.
+* **Several matched** (`outcome_multiple`) — the run proceeds. Every candidate is a KPI the dataset
+  genuinely measures, so the best-scoring one is used, `assumed` names the key that was taken,
+  `candidates` lists the others, and the disclosure appears in `assumptions`. When a model is
+  available it breaks the tie, constrained to the tied candidates. **This no longer blocks.**
+* **A vague period** (`period_vague`, `comparison_assumed`) — proceeds on a stated default, disclosed
+  the same way.
+
+A non-blocking tie looks like this, inside the ordinary `status: "ok"` envelope:
+
+```json
+{ "kind": "outcome_multiple", "blocking": false, "assumed": "bed_occupancy_rate",
+  "message": "Read as 'Bed occupancy rate'. It scored level with 'Recovery rate', so ask again naming the measure if that is not what you meant.",
+  "candidates": [ { "kpi_key": "bed_occupancy_rate", "label": "Bed occupancy rate" } ] }
+```
 
 `POST /api/questions/interpret` returns `{intent, blocked, assumptions}` and runs nothing. It backs
 the panel showing how the question was read, so a misreading can be corrected before an
@@ -253,6 +271,75 @@ investigation runs.
 **A model can never introduce a KPI.** Any key it returns is validated against the dataset's
 resolver; an unrecognised one degrades to a clarification rather than to an investigation of
 something the dataset does not measure.
+
+### Agentic question answering — `POST /api/questions/ask`
+
+The four stages above run a fixed sequence for one KPI. This endpoint does not: a model receives
+the question and all 56 analysis tools, decides which to call and in what order, and writes the
+answer itself. There are no narrative templates behind it — **the prose in `answer` is the entire
+answer**, and `evidence` is the complete list of tool calls that produced it.
+
+```
+POST /api/questions/ask
+{ "question": "What was revenue in all odd-numbered years?", "dataset_id": null }
+```
+
+No `persona`, `use_llm` or `persist`: the loop has no persona seam, no deterministic fallback, and
+saves nothing.
+
+```json
+{
+  "status": "ok",
+  "question": "What was revenue in all odd-numbered years?",
+  "answer": "Revenue across 2023 and 2025 — the odd-numbered years your data covers — was £31.63m …",
+  "evidence": [
+    { "step": 1, "tool": "query_kpi",
+      "args": { "kpi_keys": "revenue", "time_filter": { "type": "years", "values": [2023, 2025] } },
+      "result": { "rows": [ … ], "total": 31631471.07 },
+      "is_error": false }
+  ],
+  "kpis_used": ["revenue"],
+  "periods_used": ["2023,2025"],
+  "engine": { "turns": 2, "model": "claude-opus-5", "seconds": 3.1 },
+  "dataset": { "id": "ds_…", "filename": "…" },
+  "view": { "role": "business_leader", "analyst_detail_included": false, "redaction": "none" },
+  "telemetry": { … }
+}
+```
+
+**Every ending of the loop is HTTP 200 with a typed `status`**, the same way
+`/questions/investigate` returns `needs_clarification` at 200. Check `status` before reading
+`answer`:
+
+| `status` | What happened | What to render |
+|---|---|---|
+| `ok` | The model finished and wrote an answer | `answer` + the evidence panel |
+| `max_turns_exhausted` | It ran out of turns before concluding | The partial trail, and that it did not converge |
+| `truncated` | The final turn hit the output-token ceiling | The partial answer, marked incomplete |
+| `refused` | A safety classifier declined the question | The refusal; do not retry unchanged |
+| `llm_required` | No model is configured on this deployment | A configuration message. `evidence` is empty and **no dataset work was done** |
+
+**Every role receives the complete evidence trail.** `redact.py` is not applied here, and
+`view.redaction` is always `"none"` to say so. `view.analyst_detail_included` keeps the meaning it
+has everywhere else — whether the caller holds the Data Analyst role — so a client can read it
+uniformly; it simply does not govern anything on this endpoint. Showing how an answer was reached
+is the product here, not an analyst privilege. This is the one place `## The black-box principle`
+below is deliberately inverted: the box is open.
+
+**Nothing is persisted.** An answer has no KPI, verdict or leading hypothesis — the fields a saved
+investigation is shaped around — so this does not appear under `GET /api/investigations`.
+
+**This endpoint declares a response model**, unlike its four stage neighbours, for the reason given
+under `## KPI contract` below: the shape is already frozen and is the artefact a client depends on,
+so it belongs in `/openapi.json`. The five `status` values are published as an enum there.
+
+| Status | When |
+|---|---|
+| `409` | No dataset named and none active |
+| `422` | The dataset cannot be loaded, or `question` is empty or over 500 characters |
+| `503` | The reasoning provider is unavailable (timeout, rate limit, auth) |
+
+A question the loop could not answer is **never** one of these — it is a 200 with a `status`.
 
 ### Stage 1 — `observe`
 

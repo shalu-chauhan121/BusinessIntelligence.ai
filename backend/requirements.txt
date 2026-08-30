@@ -8,6 +8,11 @@ python-multipart==0.0.20
 # --- deterministic data-analysis layer ------------------------------------
 pandas==2.2.3
 numpy==2.2.1
+# X3/X4: exact t/normal distributions for p-values and Fisher-z confidence
+# intervals. Deferred to this point by agent/trend.py, agent/seasonality.py
+# and agent/correlate.py, each of which hand-rolled a robust estimator
+# rather than take the dependency early.
+scipy==1.18.0
 
 # --- unstructured / RAG ---------------------------------------------------
 pypdf==5.1.0
@@ -17,7 +22,11 @@ firebase-admin==6.6.0
 PyJWT==2.10.1
 
 # --- LLM reasoning layer --------------------------------------------------
-anthropic==0.42.0
+anthropic==1.2.0
+# A3: validates a tool call's arguments against the exact JSON Schema already
+# sent to the model (agent/registry.py) -- one source of truth, so the schema
+# a model is shown and the schema it is checked against cannot drift apart.
+jsonschema==4.26.0
 
 # --- optional: MongoDB Atlas backend (DB_BACKEND=mongo) --------------------
 pymongo==4.10.1

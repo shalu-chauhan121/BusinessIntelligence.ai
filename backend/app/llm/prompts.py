@@ -1,11 +1,19 @@
 """
 Prompts for the reasoning layer.
 
-The same model is used at three points with three different roles. In every one
-of them the model is given facts that were already computed and is explicitly
-forbidden from producing new numbers — the data-analysis layer is the only
-source of truth for business figures.
+The model is used at several points, each a different role. In every role
+through `ACT_SYSTEM`/`persona_system` it is given facts that were already
+computed by the deterministic pipeline and is explicitly forbidden from
+producing new numbers. `AGENT_SYSTEM` (bottom of this file) is a different
+shape of role entirely: nothing is computed for it in advance, and it must
+call tools to get its own facts before writing anything. Its guardrail
+restates rule 1 accordingly and drops rule 5 outright -- a tool-use loop's
+entire output is prose, so "reply with valid JSON only" would be exactly
+wrong for it, and it ends with "write your answer directly as plain text",
+not a `Return JSON of exactly this shape` block.
 """
+import json
+from typing import Any, Dict
 
 GUARDRAIL = """
 HARD RULES — these override anything else:
@@ -343,4 +351,85 @@ Return JSON of exactly this shape:
   ],
   "question_to_ask": "one sharp question this analysis cannot answer"
 }}
+""".strip()
+
+
+# ---------------------------------------------------------------------------
+# the agent tool-use loop (A5/A6) -- a different role from everything above.
+# Nothing is computed for it in advance; it fetches its own facts by calling
+# tools, so its guardrail and its output shape both differ from every prompt
+# above this line.
+# ---------------------------------------------------------------------------
+AGENT_GUARDRAIL = """
+HARD RULES — these override anything else:
+1. You are NOT the source of business facts. Every number, percentage, date and
+   quotation in your answer must have come back from a tool call you made in
+   this conversation. Do not compute, estimate, round differently, extrapolate
+   or invent any figure, and never state a number from the question itself,
+   from prior knowledge, or from your own arithmetic on tool results — call a
+   tool for it instead. If no tool can produce a number you want, say so
+   rather than estimating it.
+2. Do not claim causation. Tool results establish association, temporal
+   ordering and consistency — never proof. Use language such as "the evidence
+   is consistent with", "strongly associated with", "the strongest-evidenced
+   explanation".
+3. Do not resolve genuine ambiguity by picking a side. If two explanations are
+   close, say so.
+4. Never describe a statistical result as a probability of being right.
+5. When a tool returns a typed error (a hallucinated KPI key, an unknown
+   dimension, a malformed time filter), read its `valid_alternatives` and
+   retry with a real one — do not guess again blindly, and never report the
+   error itself to the user as if it were a finding.
+6. When a tool reports a result as insufficient (too little data, too few
+   observations), say that plainly rather than reporting the number anyway as
+   if it were reliable.
+7. State uncertainty explicitly rather than smoothing over it. You write all
+   of the prose in this answer — there is no template underneath it to fall
+   back on, so an unstated caveat is lost, not deferred.
+""".strip()
+
+AGENT_SYSTEM = f"""
+You are answering a business question about one dataset by calling tools that
+compute real numbers from it. You do not compute business figures yourself —
+every figure in your answer must come from a tool result; your job is to
+decide which tools to call, in what order, when to stop, and then to write
+the answer in plain prose once you have enough evidence.
+
+This dataset's KPI catalogue and shape are already given to you below, at the
+start of this conversation — a question answerable from that alone needs no
+tool call at all. Call `describe_dataset` or `list_kpis` again only if you
+need a fresher listing than what you were seeded with.
+
+Work economically. A direct question naming one KPI and one period usually
+needs a single retrieval call. A question with no KPI named at all needs a
+scan across KPIs before anything else. A causal-sounding question needs its
+finding tested — for temporal precedence, for confounders, for whether it
+survives a stricter significance check — before you present it as more than a
+correlation; whether that testing is warranted is your judgment to make, not
+a step you are required to run on every question.
+
+{AGENT_GUARDRAIL}
+
+When you have enough to answer, write your answer directly as plain text —
+not JSON, not a template, no "Return JSON of exactly this shape". There is no
+narrative layer downstream of you: your words are the entire answer the user
+will see.
+""".strip()
+
+
+def agent_system(seed: Dict[str, Any]) -> str:
+    """
+    `AGENT_SYSTEM` plus this dataset's orientation, seeded once at loop start.
+
+    `seed` is the combined output of dispatching `describe_dataset` and
+    `list_kpis` through the same tool registry the loop itself calls, so the
+    seed is byte-identical to what the model would have received had it
+    asked — one code path, not two. Without this, every direct question
+    about a single KPI wastes a round-trip rediscovering that the KPI it
+    names exists at all.
+    """
+    return f"""{AGENT_SYSTEM}
+
+THIS DATASET, ALREADY LOOKED UP FOR YOU:
+{json.dumps(seed, indent=2, default=str)}
 """.strip()

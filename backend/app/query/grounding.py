@@ -9,19 +9,25 @@ missing piece — that "readmitted", "readmission_count" and "readmissions" are
 the same idea — so a question phrased in the reader's words still finds the
 field the dataset happens to use.
 
-Matching is ordered by how much the evidence is worth. An exact KPI name is
-near-certain; a semantic tag is strong; a concept alias reaching a KPI through
-one of its source fields is good; overlap with the prose definition is weak and
-scored accordingly. Nothing here guesses: when two KPIs match a phrase equally
-well, both are returned and the caller decides whether that is an ambiguity
-worth asking about.
+The scoring itself lives in `agent/kpi_search.py` -- this module shapes a
+question into clauses, delegates each one, and turns the ranked candidates into
+the `KpiRef`s the intent models speak. Nothing here guesses: when two KPIs match
+a phrase equally well both are returned, and the caller decides what to do about
+it.
+
+Dimension members are resolved the same way, against the catalogue in
+`agent/dimensions.py`. That half of the function never worked until the
+catalogue existed: it read an attribute nothing ever set.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
+from ..agent.contract_api import ContractAPI
+from ..agent.dimensions import MAX_MEMBER_TOKENS
+from ..agent.kpi_search import KpiSearch
+from ..agent.text import contains_phrase, ngrams, normalise, tokens
 from ..models.investigation import KpiRef
 
 # Words that carry no signal about which KPI is meant. Deliberately small: the
@@ -56,8 +62,6 @@ _CONTRAST_MARKERS = ("even though", "even if", "although", "though", "despite",
                      "in spite of", "while", "whereas", "but", "yet",
                      "without a corresponding", "without corresponding")
 
-_TOKEN = re.compile(r"[a-z0-9_]+")
-
 
 @dataclass
 class GroundingResult:
@@ -70,66 +74,13 @@ class GroundingResult:
     note: str = ""
 
 
-def _tokens(text: str) -> List[str]:
-    return _TOKEN.findall(text.lower())
-
-
-def _ngrams(tokens: List[str], max_n: int = 4) -> List[str]:
-    """Longest first, so 'bed occupancy rate' wins over 'bed'."""
-    out: List[str] = []
-    for n in range(min(max_n, len(tokens)), 0, -1):
-        for i in range(len(tokens) - n + 1):
-            out.append("_".join(tokens[i:i + n]))
-    return out
-
-
-def _normalise(text: str) -> str:
-    return "_".join(_tokens(text))
-
-
-def _contains_phrase(haystack: str, needle: str) -> bool:
-    """
-    Whether `needle` appears in `haystack` as whole words.
-
-    A plain substring test is not good enough here: "admissions" is a substring
-    of "readmissions", and letting that count would quietly make every question
-    about admissions also a question about readmissions — two clinically
-    different measures.
-    """
-    # Split on underscores as well as whitespace: "bed_occupancy_rate" and
-    # "Bed occupancy rate" have to compare equal, and the tokeniser keeps
-    # underscores inside a token.
-    hay = [w for w in _normalise(haystack).split("_") if w]
-    need = [w for w in _normalise(needle).split("_") if w]
-    if not need or len(need) > len(hay):
-        return False
-    return any(hay[i:i + len(need)] == need for i in range(len(hay) - len(need) + 1))
-
-
-def _concept_alias_index() -> Dict[str, str]:
-    """
-    Every concept alias in the library, mapped to the field-ish name it implies.
-
-    Built once per call from the library's own concept refs so the two can never
-    drift apart. The value is the alias itself — matching a KPI happens through
-    its `source_fields`, which is what makes this dataset-specific rather than a
-    second vocabulary to maintain.
-    """
-    from ..kpi import library as lib
-
-    index: Dict[str, str] = {}
-    for name in dir(lib):
-        if not name.startswith("C_"):
-            continue
-        ref = getattr(lib, name)
-        aliases = getattr(ref, "aliases", None)
-        concept = getattr(ref, "concept", None)
-        if not aliases or not concept:
-            continue
-        for alias in aliases:
-            index.setdefault(_normalise(alias), concept)
-            index.setdefault(alias.lower(), concept)
-    return index
+# The text primitives live in `app.agent.text`: the member index files values
+# under a normalised key and the KPI search scores phrases against KPI names,
+# and all three have to agree on every input or a match silently never fires.
+_tokens = tokens
+_ngrams = ngrams
+_normalise = normalise
+_contains_phrase = contains_phrase
 
 
 def _split_contrast(question: str) -> Tuple[str, str]:
@@ -161,97 +112,21 @@ def _direction(text: str) -> str:
     return ""
 
 
-def _kpi_search_space(schema: Any) -> List[Dict[str, Any]]:
-    """Everything known about each available KPI, flattened for matching."""
-    space: List[Dict[str, Any]] = []
-    for key in getattr(schema, "available_kpis", []) or []:
-        definition = None
-        if hasattr(schema, "kpi_definition"):
-            definition = schema.kpi_definition(key)
-        spec = (getattr(schema, "contract_resolver", None) or {}).get(key)
-        space.append({
-            "key": key,
-            "label": getattr(definition, "name", "") or getattr(spec, "label", "") or key,
-            "tags": [t.lower() for t in (getattr(definition, "semantic_tags", None) or [])],
-            "source_fields": [f.lower() for f in (getattr(spec, "source_fields", None)
-                                                  or getattr(definition, "source_fields", None) or [])],
-            "definition": (getattr(definition, "business_definition", "") or "").lower(),
-            "relevance": (getattr(definition, "relevance", "") or "").lower(),
-        })
-    return space
-
-
-def _match_clause(clause: str, space: List[Dict[str, Any]],
-                  aliases: Dict[str, str], role: str) -> Tuple[List[KpiRef], Set[str]]:
+def _match_clause(clause: str, search: KpiSearch, role: str) -> Tuple[List[KpiRef], Set[str]]:
     """
     Every KPI this clause could be referring to, best evidence first.
 
-    Returns the candidates and the set of n-grams that matched something, so the
-    caller can report the words that bound to nothing.
+    The scoring lives in `agent/kpi_search.py`; this only re-shapes it into the
+    `KpiRef` the intent models speak. Returns the candidates and the set of
+    n-grams that matched something, so the caller can report the words that
+    bound to nothing.
     """
-    grams = _ngrams(_tokens(clause))
-    matched_text: Set[str] = set()
-    scored: Dict[str, Tuple[float, str, str]] = {}     # key -> (score, basis, text)
-
-    def offer(key: str, score: float, basis: str, text: str) -> None:
-        prev = scored.get(key)
-        if prev is None or score > prev[0]:
-            scored[key] = (score, basis, text)
-
-    for gram in grams:
-        pretty = gram.replace("_", " ")
-        for entry in space:
-            key_n = _normalise(entry["key"])
-            label_n = _normalise(entry["label"])
-
-            if gram == key_n or gram == label_n:
-                offer(entry["key"], 1.0, "exact_name", pretty)
-                matched_text.add(gram)
-                continue
-            # A multi-word gram contained in the label is still strong evidence
-            # ("bed occupancy" for "Bed occupancy rate"), a single word much less
-            # so ("rate" must not claim every rate KPI). Whole words only —
-            # "admissions" must not match "readmissions".
-            if len(gram) > 3 and (_contains_phrase(label_n, gram)
-                                  or _contains_phrase(key_n, gram)):
-                weight = 0.85 if "_" in gram else 0.55
-                offer(entry["key"], weight, "exact_name", pretty)
-                matched_text.add(gram)
-                continue
-            if gram in entry["tags"]:
-                offer(entry["key"], 0.8, "semantic_tag", pretty)
-                matched_text.add(gram)
-                continue
-
-            concept = aliases.get(gram)
-            if concept:
-                # The alias names a concept; bind it to a KPI only when one of
-                # that KPI's own source fields carries the same alias or concept.
-                for fld in entry["source_fields"]:
-                    fld_n = _normalise(fld)
-                    if fld_n == gram or aliases.get(fld_n) == concept:
-                        offer(entry["key"], 0.7, "concept_alias", pretty)
-                        matched_text.add(gram)
-                        break
-                else:
-                    if _normalise(concept) in (key_n, label_n):
-                        offer(entry["key"], 0.65, "concept_alias", pretty)
-                        matched_text.add(gram)
-                continue
-
-            if "_" in gram and len(gram) > 6:
-                if _contains_phrase(entry["definition"], gram):
-                    offer(entry["key"], 0.35, "business_definition", pretty)
-                    matched_text.add(gram)
-
-    refs = [
-        KpiRef(kpi_key=k, label=next(e["label"] for e in space if e["key"] == k),
-               role=role, match_basis=basis, confidence=round(score, 2),
-               matched_text=text)
-        for k, (score, basis, text) in scored.items()
-    ]
-    refs.sort(key=lambda r: (-r.confidence, r.kpi_key))
-    return refs, matched_text
+    result = search.search(clause, limit=None)
+    refs = [KpiRef(kpi_key=m.kpi_key, label=m.label, role=role,
+                   match_basis=m.basis, confidence=m.score,
+                   matched_text=m.matched_gram.replace("_", " "))
+            for m in result.matches]
+    return refs, set(result.matched_grams)
 
 
 def ground_question(question: str, schema: Any) -> GroundingResult:
@@ -263,13 +138,14 @@ def ground_question(question: str, schema: Any) -> GroundingResult:
     the thing to explain. Dimension words are matched against the dataset's own
     dimensions, and their members against the values those columns hold.
     """
-    space = _kpi_search_space(schema)
-    aliases = _concept_alias_index()
+    search = KpiSearch(ContractAPI(schema))
     main, contrast = _split_contrast(question)
 
-    outcome, matched_main = _match_clause(main, space, aliases, "outcome")
-    comparison, matched_contrast = _match_clause(contrast, space, aliases, "comparison") \
-        if contrast.strip() else ([], set())
+    outcome, matched_main = _match_clause(main, search, "outcome")
+    if contrast.strip():
+        comparison, matched_contrast = _match_clause(contrast, search, "comparison")
+    else:
+        comparison, matched_contrast = [], set()
 
     # A KPI named in both clauses belongs to the outcome; drop the duplicate.
     outcome_keys = {r.kpi_key for r in outcome}
@@ -281,17 +157,22 @@ def ground_question(question: str, schema: Any) -> GroundingResult:
         ceiling = comparison[0].confidence
         comparison = [r for r in comparison if ceiling - r.confidence < 0.25]
 
-    dimension_hints, entity_filters = _match_dimensions(question, schema)
+    # KPI matching runs first and its grams are handed on: a word already spent
+    # naming the measure must not also be read as a value to filter by.
+    matched_kpi_grams = matched_main | matched_contrast
+    dimension_hints, entity_filters, bound_grams = _match_dimensions(
+        question, schema, matched_kpi_grams)
 
     all_tokens = set(_tokens(question))
-    consumed = {t for gram in (matched_main | matched_contrast) for t in gram.split("_")}
+    consumed = {t for gram in matched_kpi_grams for t in gram.split("_")}
+    consumed |= {t for gram in bound_grams for t in gram.split("_")}
     unmapped = sorted(
         t for t in all_tokens
         if t not in _STOP and t not in consumed and t not in _DECLINE_WORDS
         and t not in _RISE_WORDS and t not in _FLAT_WORDS
         and not t.isdigit() and len(t) > 2
         and t not in {d.lower() for d in dimension_hints}
-        and t not in {v.lower() for v in entity_filters.values()}
+        and t not in {t2 for v in entity_filters.values() for t2 in _tokens(v)}
     )
 
     return GroundingResult(
@@ -306,24 +187,75 @@ def ground_question(question: str, schema: Any) -> GroundingResult:
     )
 
 
-def _match_dimensions(question: str, schema: Any) -> Tuple[List[str], Dict[str, str]]:
-    """Dimension columns the question names, and the members it filters to."""
-    grams = set(_ngrams(_tokens(question)))
+# Words that name a movement, a period or nothing at all. A dimension member
+# that happens to be spelled like one of them is not evidence the question meant
+# that member -- a segment called "Other" must not filter every question that
+# says "other".
+_UNBINDABLE = _STOP | _DECLINE_WORDS | _RISE_WORDS | _FLAT_WORDS
+
+
+def _match_dimensions(question: str, schema: Any,
+                      consumed_grams: Set[str] = frozenset()
+                      ) -> Tuple[List[str], Dict[str, str], Set[str]]:
+    """
+    Dimension columns the question names, and the members it filters to.
+
+    Until the member catalogue existed this read `schema.dimension_members`, an
+    attribute nothing ever set, so the filter half never fired. It now walks the
+    catalogue's index, longest phrase first, under three rules:
+
+      * a phrase already spent on a KPI is not reconsidered as a member. The
+        KPI is what the question is *about*, and a column whose values collide
+        with a measure's name must not steal it.
+      * a phrase that is a stopword or a movement word never binds.
+      * a phrase held by two different columns binds neither. That is a real
+        ambiguity, and picking one silently is the failure this closes.
+
+    Returns the dimensions, the filters, and the grams that resolved to a
+    member, so the caller does not report them as unmapped.
+    """
+    catalogue = getattr(schema, "member_catalogue", None)
     dims: List[str] = []
     filters: Dict[str, str] = {}
+    bound_grams: Set[str] = set()
 
+    tokens = _tokens(question)
+    # Widen the window only as far as the widest value actually indexed, so a
+    # dataset of one-word members pays nothing for one that has five.
+    width = 4
+    if catalogue is not None:
+        width = max(4, min(catalogue.max_member_tokens, MAX_MEMBER_TOKENS))
+
+    if catalogue is not None:
+        # Longest first so "north campus" is considered before "north"; within
+        # one width, lexicographic, so the reading never depends on gram order.
+        for gram in sorted(_ngrams(tokens, max_n=width),
+                           key=lambda g: (-(g.count("_") + 1), g)):
+            if gram in consumed_grams or gram in _UNBINDABLE:
+                continue
+            matches = catalogue.lookup(gram)
+            if len(matches) != 1:
+                # Nothing, or an ambiguity no evidence here can settle. Either
+                # way the phrase is accounted for rather than merely dropped.
+                if matches:
+                    bound_grams.add(gram)
+                continue
+            match = matches[0]
+            if match.dimension in filters:
+                continue
+            filters[match.dimension] = match.member
+            bound_grams.add(gram)
+            if match.dimension not in dims:
+                dims.append(match.dimension)
+
+    grams = set(_ngrams(tokens, max_n=width))
     for dim in getattr(schema, "dimensions", []) or []:
+        if dim in dims:
+            continue
         dim_n = _normalise(dim)
+        if dim_n in bound_grams or dim_n.rstrip("s") in bound_grams:
+            continue
         if dim_n in grams or dim_n.rstrip("s") in grams:
             dims.append(dim)
 
-    members = getattr(schema, "dimension_members", None) or {}
-    for dim, values in members.items():
-        for value in values or []:
-            if _normalise(str(value)) in grams:
-                filters[dim] = str(value)
-                if dim not in dims:
-                    dims.append(dim)
-                break
-
-    return dims, filters
+    return dims, filters, bound_grams

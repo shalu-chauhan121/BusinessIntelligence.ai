@@ -1,18 +1,32 @@
-"""The four investigation stages, the dashboard, and saved investigations."""
+"""
+The four investigation stages, the dashboard, saved investigations, and the
+agent loop.
+
+Most routes here return `Dict[str, Any]` with no `response_model`: a stage
+payload is a deep, engine-shaped dict that moved with every batch, so pinning
+it in OpenAPI would have cost more than it bought. `/questions/ask` is the one
+exception and declares a real response model, for the reason `routes_kpi.py`
+gives about the KPI contract — its shape is already frozen (`AgentAnswer`) and
+is the artefact a client depends on.
+"""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from ..agent import loop
+from ..agent.context import AgentContext
 from ..db.repositories import DatasetRepository, InvestigationRepository, TelemetryRepository
 from ..deps import active_dataset, current_user
 from ..engines.contest import contest as contest_stage
 from ..engines.investigate import investigate as investigate_stage
 from ..engines.act import act as act_stage
 from ..engines.observe import available_timeframes
-from ..llm.client import get_llm
-from ..models.schemas import AnalysisRequest, QuestionRequest
+from ..llm.client import LLMTransportError, get_llm
+from ..models.schemas import (AgentAnswerResponse, AgentQuestionRequest, AnalysisRequest,
+                              QuestionRequest)
 from ..personas import persona_for_role
 from ..query import interpret_question_cached
 from ..services import dataset_service, pipeline
@@ -24,6 +38,8 @@ from .redact import (
     redact_observation,
     redact_result,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -42,6 +58,28 @@ def _dataset_for(user: Dict[str, Any], dataset_id: Optional[str]) -> Dict[str, A
 def _guard(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
+    except (ValueError, dataset_service.DatasetError) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+def _llm_guard(fn, *args, **kwargs):
+    """
+    `_guard`, plus the tool loop's one failure mode that is not about the
+    request at all.
+
+    A provider timeout or rate limit is neither a malformed request (422) nor a
+    bug in this codebase (500), and it must not be laundered into a 200 with a
+    typed status either — that would make an outage indistinguishable from a
+    successful answer to `/api/telemetry/summary`. The SDK's own message goes to
+    the log, not to the caller.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except LLMTransportError as exc:
+        log.warning("agent loop transport failure: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The reasoning provider is unavailable. Try again in a moment.") from exc
     except (ValueError, dataset_service.DatasetError) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
@@ -286,6 +324,61 @@ def investigate_question(body: QuestionRequest,
             return result
     result["telemetry"] = telemetry.saved
     return redact_result(result, user)
+
+
+# ---------------------------------------------------------------------------
+# agentic question answering
+# ---------------------------------------------------------------------------
+@router.post("/questions/ask", response_model=AgentAnswerResponse)
+def ask_question(body: AgentQuestionRequest,
+                 user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """
+    Ask a business question and get a prose answer plus the complete trail of
+    tool calls that produced it.
+
+    Every ending of the agent loop is HTTP 200 with a typed `status`, the same
+    way `/questions/investigate` returns `needs_clarification` at 200: a
+    question the loop could not converge on, a safety refusal, and the absence
+    of an API key are all things a client renders, not errors it retries. Only
+    a missing dataset (409), a broken one (422) and a provider outage (503) are
+    errors.
+
+    Nothing is persisted, so this does not appear under `GET /api/investigations`.
+
+    The evidence trail is complete for every role — `redact.py` is deliberately
+    not applied here. Showing how the answer was reached is the point of the
+    endpoint, not an analyst privilege; `view.redaction` says so explicitly.
+    """
+    ds = _dataset_for(user, body.dataset_id)
+    with request_telemetry(user["uid"], "/api/questions/ask") as telemetry:
+        with track_processing_step("Build agent context", "Non-LLM Processing"):
+            # Loads the dataset, compiles the contract facade and builds all 56
+            # tool schemas — the only substantial non-LLM work in the request.
+            ctx = _guard(AgentContext.build, user["uid"], ds)
+        # `llm` is passed rather than left to `loop.answer`'s own lazy lookup,
+        # matching the four stage endpoints and giving tests the same seam.
+        result = _llm_guard(loop.answer, body.question, ctx, llm=get_llm())
+    return {
+        # Field by field rather than `dataclasses.asdict`: that deep-copies
+        # recursively, and `evidence[*]["result"]` is an arbitrarily large
+        # nested tool payload. Serialising is this endpoint's whole job, so it
+        # is written out where it can be read.
+        "status": result.status,
+        "question": result.question,
+        "answer": result.answer,
+        "evidence": result.evidence,
+        "kpis_used": result.kpis_used,
+        "periods_used": result.periods_used,
+        "engine": result.engine,
+        "dataset": {"id": ds["_id"], "filename": ds.get("filename")},
+        # `analyst_detail_included` keeps the meaning it has everywhere else in
+        # this API — whether the caller holds the analyst role — so a client can
+        # read it uniformly. `redaction` is what says this particular endpoint
+        # withheld nothing from anyone.
+        "view": {"role": user.get("role"), "analyst_detail_included": is_analyst(user),
+                 "redaction": "none"},
+        "telemetry": telemetry.saved,
+    }
 
 
 @router.get("/telemetry/summary")

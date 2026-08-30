@@ -9,10 +9,13 @@ exist; it cannot introduce one. A key it returns that is not in the resolver is
 discarded, and the question falls through to a clarification rather than to a
 confident answer about the wrong measure.
 
-The ambiguity policy is deliberate. An unresolvable outcome blocks, because
-picking a KPI on the reader's behalf answers a question they did not ask. A
-vague period does not block, because there is an obvious, statable default and
-the reader can see it was assumed.
+The ambiguity policy is deliberate, and it turns on a distinction. An outcome
+that resolves to *nothing* blocks: there is no answer to give, and inventing a
+KPI answers a question nobody asked. An outcome that resolves to several things
+does not block. Every one of those candidates is a KPI this dataset genuinely
+measures, so the best-scoring one is used, the others are named, and `assumed`
+records which was taken -- the reader sees the choice and can restate it. A
+vague period behaves the same way, on the same reasoning.
 """
 from __future__ import annotations
 
@@ -92,13 +95,29 @@ def _resolve_outcome(question: str, grounded: GroundingResult, schema: Any,
         top, second = candidates[0], candidates[1]
         if top.confidence - second.confidence >= TIE_MARGIN:
             return top, [], False, ""
-        # A genuine tie. Ask rather than pick.
-        near = [c for c in candidates if top.confidence - c.confidence < TIE_MARGIN]
-        names = ", ".join(f"'{c.label}'" for c in near[:4])
-        return None, [Ambiguity(
-            kind="outcome_multiple", blocking=True,
-            message=f"This question could be about {names}. Which one did you mean?",
-            candidates=near[:4])], False, ""
+
+        # A tie is not an impasse. Every candidate is a KPI this dataset really
+        # measures, so answering about the best-scoring one and saying which
+        # others were in play is strictly more useful than refusing -- and it is
+        # the case a model is best placed to settle, which it was never asked to
+        # do before: the fallback below only ever ran on an EMPTY candidate list.
+        near = [c for c in candidates if top.confidence - c.confidence < TIE_MARGIN][:4]
+        chosen, note, llm_used = top, "", False
+        if llm is not None and getattr(llm, "enabled", False):
+            picked, llm_note = _ask_llm(question, schema, llm)
+            llm_used = True
+            # The model may break the tie; it may not step outside it. An
+            # unconstrained pick would let it choose a KPI that scored nothing,
+            # which is a different failure from the one being fixed.
+            if picked and picked.kpi_key in {c.kpi_key for c in near}:
+                chosen, note = picked, llm_note
+        others = ", ".join(f"'{c.label}'" for c in near if c.kpi_key != chosen.kpi_key)
+        message = (f"Read as '{chosen.label}'. It scored level with {others}, so ask "
+                   f"again naming the measure if that is not what you meant."
+                   if others else f"Read as '{chosen.label}'.")
+        return chosen, [Ambiguity(
+            kind="outcome_multiple", blocking=False, message=message,
+            candidates=near, assumed=chosen.kpi_key)], llm_used, note
 
     # Nothing bound deterministically — this is where the model earns its place.
     if llm is not None and getattr(llm, "enabled", False):

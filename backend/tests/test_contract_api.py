@@ -16,7 +16,8 @@ from pathlib import Path
 import pandas as pd
 
 from app.agent.contract_api import ContractAPI, DimensionInfo, KpiInfo
-from app.agent.errors import UnknownDimensionError, UnknownKpiError
+from app.agent.errors import (UnknownDimensionError, UnknownKpiError,
+                              UnknownMemberError)
 from app.engines.metrics import compute as legacy_compute
 from app.engines.metrics import detect_schema, higher_is_better, metric_label, metric_unit, prepare
 from app.kpi import service as kpi_service
@@ -204,6 +205,73 @@ class TestContractApiOnContractlessDataset(unittest.TestCase):
     def test_unknown_key_still_raises_typed_error(self):
         with self.assertRaises(UnknownKpiError):
             self.api.value(self.df, "not_a_real_kpi_xyz")
+
+
+class TestContractApiExposesDimensionMembers(EngineTestCase):
+    """
+    C4. `grounding.py` has always read `schema.dimension_members`, which never
+    existed, so a question naming a region bound no filter. The facade is where
+    the agent layer reaches that index, and an invented member has to be a
+    recoverable error rather than an empty slice -- an empty slice is
+    indistinguishable from a real zero once it becomes a number.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from app.services import dataset_service
+
+        cls.df, cls.loaded_schema = dataset_service.load(cls.dataset, cls.uid)
+        cls.api = ContractAPI(cls.loaded_schema)
+
+    def test_list_members_returns_a_page_not_the_whole_column(self):
+        page = self.api.list_members("region", limit=2)
+        self.assertEqual(len(page.members), 2)
+        self.assertEqual(page.total, int(self.df["region"].nunique()))
+        self.assertTrue(page.indexed)
+
+    def test_list_members_on_an_unknown_dimension_raises_the_typed_error(self):
+        with self.assertRaises(UnknownDimensionError) as ctx:
+            self.api.list_members("not_a_dimension_xyz")
+        self.assertEqual(ctx.exception.to_payload()["error"], "unknown_dimension")
+        self.assertIn("region", ctx.exception.valid_alternatives)
+
+    def test_resolve_member_is_case_insensitive(self):
+        for spelling in ("North", "north", "NORTH", "  north  "):
+            self.assertEqual(self.api.resolve_member("region", spelling), "North")
+
+    def test_resolve_member_on_an_unknown_value_raises_with_valid_alternatives(self):
+        with self.assertRaises(UnknownMemberError) as ctx:
+            self.api.resolve_member("region", "Atlantis")
+        payload = ctx.exception.to_payload()
+        self.assertEqual(payload["error"], "unknown_member")
+        self.assertEqual(payload["dimension"], "region")
+        self.assertEqual(payload["requested"], "Atlantis")
+        self.assertIn("North", payload["valid_alternatives"])
+
+    def test_a_schema_with_no_attached_catalogue_still_works_from_a_supplied_frame(self):
+        """
+        A schema built by a bare detect_schema/prepare -- how the KPI bootstrap
+        path and much of this suite build theirs -- carries no catalogue. It
+        must not silently look like a dataset with no members.
+        """
+        bare = detect_schema(pd.read_csv(FIXTURES / "hospital_sample.csv"))
+        frame = prepare(pd.read_csv(FIXTURES / "hospital_sample.csv"), bare)
+        api = ContractAPI(bare)
+        self.assertIsNone(getattr(bare, "member_catalogue", None))
+        page = api.list_members("department", df=frame)
+        self.assertEqual(list(page.members), sorted(frame["department"].astype(str).unique()))
+
+    def test_list_dimensions_reports_distinct_count_without_a_frame_when_a_catalogue_is_attached(self):
+        by_name = {d.name: d for d in self.api.list_dimensions()}
+        self.assertEqual(by_name["region"].distinct_count, int(self.df["region"].nunique()))
+        self.assertTrue(by_name["region"].indexed)
+
+    def test_find_members_never_chooses_between_two_columns(self):
+        matches = self.api.find_members("Product A")
+        self.assertEqual([(m.dimension, m.member) for m in matches],
+                         [("product", "Product A")])
+        self.assertEqual(self.api.find_members("Atlantis"), [])
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ from .analysis import (
     member_change_table,
     weekly_frame,
 )
-from .metrics import DatasetSchema, Resolver, metric_label
+from .metrics import DatasetSchema, Resolver, higher_is_better, metric_label
 
 CONTRADICTION_QUERIES = {
     "supply_constraint": [
@@ -179,6 +179,11 @@ def consistency_check(cur: pd.DataFrame, base: pd.DataFrame, schema: DatasetSche
         table, kpi, cause_metric,
         kpi_drop_pct=-5.0, cause_move_pct=5.0,
         cause_direction=hypothesis.get("cause_direction", "down"),
+        # Without this, a lower-is-better KPI (readmission_rate, mortality_rate,
+        # ...) gets the exactly inverted counterexample: the department whose
+        # rate *improved* the most reads as the contradiction, and the one
+        # that actually got worse is missed entirely.
+        kpi_higher_better=higher_is_better(kpi, schema.contract_resolver),
     )
     return {
         "status": "checked",

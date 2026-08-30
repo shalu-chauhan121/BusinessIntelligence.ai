@@ -162,11 +162,22 @@ def correlate(table: pd.DataFrame, metric_a: str, metric_b: str) -> Dict[str, An
 
 def counterexamples(table: pd.DataFrame, kpi: str, cause_metric: str,
                     kpi_drop_pct: float = -5.0, cause_move_pct: float = 5.0,
-                    cause_direction: str = "up") -> List[Dict[str, Any]]:
+                    cause_direction: str = "up",
+                    kpi_higher_better: bool = True) -> List[Dict[str, Any]]:
     """
     Members where the KPI moved badly but the proposed cause did NOT move.
     These are the cleanest contradictions available from structured data.
+
+    `kpi_higher_better` (default `True`, so every existing caller keeps its
+    exact prior behaviour) controls which direction counts as "moved badly":
+    a fall of at least `abs(kpi_drop_pct)` when higher is better, a *rise* of
+    at least the same magnitude otherwise. Without it this function is wrong,
+    not merely incomplete, on a lower-is-better KPI -- measured on
+    `readmission_rate`, it names the one department whose readmissions
+    *improved* as the counterexample and misses the one that actually
+    contradicts the hypothesis.
     """
+    threshold = abs(kpi_drop_pct)
     out = []
     for _, row in table.iterrows():
         kpi_chg = row.get(f"{kpi}__chg")
@@ -175,7 +186,8 @@ def counterexamples(table: pd.DataFrame, kpi: str, cause_metric: str,
             continue
         if not (np.isfinite(kpi_chg) and np.isfinite(cause_chg)):
             continue
-        if kpi_chg <= kpi_drop_pct:
+        kpi_worsened = kpi_chg <= -threshold if kpi_higher_better else kpi_chg >= threshold
+        if kpi_worsened:
             moved = cause_chg >= cause_move_pct if cause_direction == "up" else cause_chg <= -cause_move_pct
             if not moved:
                 out.append({
