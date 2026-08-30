@@ -3,7 +3,7 @@
 
 # BusinessIntelligence.ai
 
-### [Live Demo](businessintelligence-bbt.vercel.app)
+### [Live Demo](https://businessintelligence-bbt.vercel.app))
 
 **An evidence-backed KPI investigation system — an agent that answers business questions from your own data and documents, and shows its working.**
 
