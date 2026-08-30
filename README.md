@@ -7,6 +7,8 @@
 Dashboards tell you *what* happened. This tells you what changed, whether it matters,
 what most likely explains it, **what contradicts that explanation**, and what to do next.
 
+
+
 `OBSERVE → INVESTIGATE → CONTEST → ACT`
 
 Accenture Innovation Challenge 2026 · Prototype submission
